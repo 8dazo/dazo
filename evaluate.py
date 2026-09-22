@@ -23,9 +23,8 @@ def brier(probs, labels):
 def resolve_model_reference(spec: str) -> str:
     path = Path(spec).expanduser()
     if path.exists():
-        return str(path)
+        return str(path.resolve())
 
-    # Distinguish an intended local checkpoint from a valid Hub id such as namespace/model.
     looks_local = (
         path.is_absolute()
         or spec.startswith(".")
@@ -40,6 +39,15 @@ def resolve_model_reference(spec: str) -> str:
     return spec
 
 
+def resolve_data_path(spec: str) -> str:
+    path = Path(spec).expanduser()
+    if not path.exists():
+        raise SystemExit(f"Evaluation data not found: {path}")
+    if not path.is_file():
+        raise SystemExit(f"Evaluation data must be a JSONL file: {path}")
+    return str(path.resolve())
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
@@ -50,11 +58,15 @@ def main():
     args = p.parse_args()
 
     model_ref = resolve_model_reference(args.model)
+    data_ref = resolve_data_path(args.data)
+    print(f"model={model_ref}")
+    print(f"data={data_ref}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DazoForDecision.from_pretrained(model_ref).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(model_ref)
     collator = DazoCollator(tokenizer, model.config.context_max_length, model.config.option_max_length)
-    loader = DataLoader(JsonlDecisionDataset(args.data), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
+    loader = DataLoader(JsonlDecisionDataset(data_ref), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
     loops = sorted(set(int(x) for x in args.loops.split(",") if x.strip()))
     max_loop = max(loops)
 
@@ -92,8 +104,8 @@ def main():
 
     elapsed = time.perf_counter() - started
     report = {
-        "model": args.model,
-        "data": args.data,
+        "model": model_ref,
+        "data": data_ref,
         "loop_budgets": loops,
         "examples_per_second": sum(x["total"] for x in stats.values()) / max(len(loops), 1) / max(elapsed, 1e-9),
         "loops": {},
@@ -130,7 +142,7 @@ def main():
     rendered = json.dumps(report, indent=2)
     print(rendered)
     if args.output:
-        path = Path(args.output)
+        path = Path(args.output).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(rendered + "\n", encoding="utf-8")
         print(f"saved report to {path}")
