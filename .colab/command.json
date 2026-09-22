@@ -1,6 +1,6 @@
 {
-  "id": 2,
-  "task": "status",
+  "id": 3,
+  "task": "tests",
   "args": {},
-  "note": "Initial bridge connectivity check. Once the Colab bridge is online it will report GPU/runtime plus discovered checkpoint and test data to Drive."
+  "note": "Run Dazo core/loss regression tests on the live Colab bridge before preparing data or training."
 }
