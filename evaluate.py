@@ -20,6 +20,26 @@ def brier(probs, labels):
     return float(((probs.float() - target) ** 2).sum(-1).mean().cpu())
 
 
+def resolve_model_reference(spec: str) -> str:
+    path = Path(spec).expanduser()
+    if path.exists():
+        return str(path)
+
+    # Distinguish an intended local checkpoint from a valid Hub id such as namespace/model.
+    looks_local = (
+        path.is_absolute()
+        or spec.startswith(".")
+        or spec.startswith("outputs/")
+        or len(path.parts) > 2
+    )
+    if looks_local:
+        raise SystemExit(
+            f"Local checkpoint not found: {path}. Training must complete successfully before "
+            "evaluation; rerun train.py and confirm it prints 'saved .../final'."
+        )
+    return spec
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
@@ -29,9 +49,10 @@ def main():
     p.add_argument("--output", help="Optional JSON report path.")
     args = p.parse_args()
 
+    model_ref = resolve_model_reference(args.model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DazoForDecision.from_pretrained(args.model).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = DazoForDecision.from_pretrained(model_ref).to(device).eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_ref)
     collator = DazoCollator(tokenizer, model.config.context_max_length, model.config.option_max_length)
     loader = DataLoader(JsonlDecisionDataset(args.data), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
     loops = sorted(set(int(x) for x in args.loops.split(",") if x.strip()))
