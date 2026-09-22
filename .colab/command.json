@@ -1,10 +1,10 @@
 {
-  "id": 6,
+  "id": 7,
   "task": "gate1_eval",
   "args": {
     "checkpoint": "/content/drive/MyDrive/DazoBridge/checkpoints/dazo-proofwriter-pilot/final",
     "loops": "1,2,4,6,8",
     "batch_size": 8
   },
-  "note": "Evaluate the trained Dazo pilot at 1/2/4/6/8 recurrent loops and save Gate 1 metrics to Drive."
+  "note": "Rerun Gate 1 after fixing checkpoint tokenizer loading and adding embedding-index preflight checks."
 }
