@@ -1,4 +1,8 @@
 """Hugging Face configuration for Dazo."""
+from __future__ import annotations
+
+from typing import Any, Optional
+
 from transformers import PretrainedConfig
 
 
@@ -8,6 +12,7 @@ class DazoConfig(PretrainedConfig):
     def __init__(
         self,
         backbone_name: str = "jhu-clsp/mmBERT-small",
+        backbone_config: Optional[dict[str, Any]] = None,
         context_max_length: int = 1024,
         option_max_length: int = 32,
         latent_dim: int = 384,
@@ -30,6 +35,11 @@ class DazoConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.backbone_name = backbone_name
+        # Persist the encoder architecture inside Dazo's config. This lets
+        # from_pretrained() construct the backbone with AutoModel.from_config()
+        # while Transformers is in its meta-device loading context, then load
+        # the actual backbone weights from the Dazo checkpoint state dict.
+        self.backbone_config = backbone_config
         self.context_max_length = context_max_length
         self.option_max_length = option_max_length
         self.latent_dim = latent_dim
