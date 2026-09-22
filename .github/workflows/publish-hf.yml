@@ -3,6 +3,15 @@ name: Publish Dazo to Hugging Face
 on:
   push:
     branches: [main]
+    paths:
+      - 'MODEL_CARD.md'
+      - 'LICENSE'
+      - 'pyproject.toml'
+      - 'dazo/**'
+      - 'configs/**'
+      - 'research/**'
+      - 'outputs/dazo-proofwriter/final/**'
+      - '.github/workflows/publish-hf.yml'
   workflow_dispatch:
 
 permissions:
@@ -51,8 +60,16 @@ jobs:
             fi
           done
 
-          # When a trained checkpoint exists, publish its Hugging Face files at
-          # the model-repository root so AutoModel.from_pretrained can load it.
+          # Transformers dynamic modules named in config.auto_map must exist at
+          # the Hub repo root. Keep the package copy too for source browsing.
+          for file in configuration_dazo.py modeling_dazo.py core.py; do
+            if [ -f "dazo/$file" ]; then
+              cp "dazo/$file" ".hf_publish/$file"
+            fi
+          done
+
+          # Once a trained checkpoint is committed or restored into this path,
+          # its config/weights/tokenizer become the root loadable artifact.
           if [ -d outputs/dazo-proofwriter/final ]; then
             cp -R outputs/dazo-proofwriter/final/. .hf_publish/
           fi
