@@ -1,6 +1,6 @@
 {
-  "id": 1,
-  "task": "idle",
+  "id": 2,
+  "task": "status",
   "args": {},
-  "note": "Bridge bootstrap command. ChatGPT will increment id and replace task/args for future runs."
+  "note": "Initial bridge connectivity check. Once the Colab bridge is online it will report GPU/runtime plus discovered checkpoint and test data to Drive."
 }
