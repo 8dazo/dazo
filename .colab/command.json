@@ -1,10 +1,13 @@
 {
-  "id": 13,
-  "task": "prepare_pilot",
+  "id": 14,
+  "task": "train_pilot",
   "args": {
-    "train_max_depth": 3,
-    "limit_train": 64,
-    "limit_eval": 64
+    "output": "/content/dazo/outputs/dazo-micro-overfit",
+    "epochs": 20,
+    "batch_size": 8,
+    "grad_accum": 1,
+    "lr": 0.001,
+    "depth_budgets": "1,2,3,4,6,8"
   },
-  "note": "Create a tiny balanced ProofWriter set for an overfit sanity check of the current architecture."
+  "note": "Overfit sanity check: train current Dazo architecture aggressively on only 64 balanced examples. Store repeated epoch checkpoints on ephemeral Colab disk, not Drive."
 }
