@@ -100,7 +100,10 @@ def main():
         f"amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}"
     )
 
-    model = DazoForDecision(cfg).to(device)
+    # Fresh training intentionally starts from the named pretrained encoder.
+    # Checkpoint reloads use DazoForDecision.from_pretrained(), which reconstructs
+    # the encoder from config and lets the outer Dazo state dict restore all weights.
+    model = DazoForDecision.from_backbone_pretrained(cfg).to(device)
     if args.unfreeze_backbone:
         model.unfreeze_backbone()
 
