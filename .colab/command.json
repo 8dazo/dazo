@@ -1,10 +1,10 @@
 {
-  "id": 9,
+  "id": 10,
   "task": "prepare_pilot",
   "args": {
     "train_max_depth": 3,
     "limit_train": 3000,
     "limit_eval": 1000
   },
-  "note": "Rebuild ProofWriter pilot with balanced train depths 0-3 and balanced validation/test depths 0-8."
+  "note": "Retry depth-aware ProofWriter preparation: strict train balance 0-3; eval preserves scarce deep examples and redistributes unused quota without duplicates."
 }
