@@ -1,13 +1,10 @@
 {
-  "id": 11,
-  "task": "train_pilot",
+  "id": 12,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/drive/MyDrive/DazoBridge/checkpoints/dazo-proofwriter-balanced",
-    "epochs": 1,
-    "batch_size": 4,
-    "grad_accum": 2,
-    "lr": 0.0002,
-    "depth_budgets": "1,2,3,4,6,8"
+    "checkpoint": "/content/drive/MyDrive/DazoBridge/checkpoints/dazo-proofwriter-balanced/final",
+    "loops": "1,2,4,6,8",
+    "batch_size": 8
   },
-  "note": "Train a fresh Dazo checkpoint on the corrected depth-balanced shallow training set; keep the original pilot checkpoint untouched."
+  "note": "Gate 1 on the corrected depth-aware test set using the fresh balanced checkpoint."
 }
