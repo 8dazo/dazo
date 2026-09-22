@@ -1,0 +1,6 @@
+{
+  "id": 1,
+  "task": "idle",
+  "args": {},
+  "note": "Bridge bootstrap command. ChatGPT will increment id and replace task/args for future runs."
+}
