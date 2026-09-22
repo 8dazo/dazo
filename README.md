@@ -1,8 +1,17 @@
 # Dazo
 
+[![Open ProofWriter pilot in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/8dazo/dazo/blob/main/notebooks/Dazo_v0_ProofWriter.ipynb)
+
 Dazo is a research implementation of an **adaptive recurrent latent decision model**. It is built for decisions where the desired output is a probability distribution over explicit candidates, not generated prose.
 
-Target Hugging Face repository: `d2v1shx/dazo`.
+Hugging Face: `d2v1shx/dazo` · GitHub: `8dazo/dazo`.
+
+## Current validation status
+
+- pure-PyTorch recurrent-core invariants pass in GitHub Actions;
+- real `jhu-clsp/mmBERT-small` forward integration passes;
+- GitHub → Hugging Face Trusted Publishing is live;
+- ProofWriter is the first training gate; no reasoning-improvement claim is made before the recurrence curve is measured.
 
 ## v0 architecture
 
@@ -70,6 +79,8 @@ Supported `type` values: `choice`, `binary`/`noul`, and `score`/`ordinal`. For o
 
 ## First experiment: ProofWriter depth extrapolation
 
+Training samples recurrent budgets from `1,2,3,4,6,8` instead of training at one fixed loop count.
+
 ```bash
 python scripts/prepare_proofwriter.py \
   --output data/proofwriter \
@@ -83,7 +94,8 @@ python train.py \
   --eval data/proofwriter/validation.jsonl \
   --output outputs/dazo-proofwriter \
   --epochs 3 \
-  --batch-size 8
+  --batch-size 8 \
+  --depth-budgets 1,2,3,4,6,8
 
 python evaluate.py \
   --model outputs/dazo-proofwriter/final \
@@ -113,8 +125,8 @@ Banking77 gives Dazo 77 candidate intents. Because options are separate queries,
 
 Do not add R4–R6 until R1–R3 show a stable recurrence benefit.
 
-## Publish as `d2v1shx/dazo`
+## Publishing
 
-This repository is configured for Hugging Face Trusted Publishing from GitHub Actions. Create the model repo `d2v1shx/dazo` on Hugging Face, add `8dazo/dazo` as a trusted GitHub Actions publisher pinned to branch `main` and workflow `publish-hf.yml`, then run the workflow. No long-lived `HF_TOKEN` secret is required.
+`main` automatically publishes model-facing files to `d2v1shx/dazo` using Hugging Face Trusted Publishing and GitHub OIDC. No long-lived `HF_TOKEN` GitHub secret is required.
 
-See `research/ARCHITECTURE.md` for the research rationale and source map.
+See `research/ARCHITECTURE.md` and `research/EXPERIMENTS.md` for the rationale, gates, and source map.
