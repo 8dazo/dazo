@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
-from transformers import AutoModel, PreTrainedModel
+from transformers import AutoConfig, AutoModel, PreTrainedModel
 
 from .configuration_dazo import DazoConfig
 from .core import DazoCore
@@ -21,7 +21,13 @@ class DazoForDecision(PreTrainedModel):
 
     def __init__(self, config: DazoConfig):
         super().__init__(config)
-        self.backbone = AutoModel.from_pretrained(config.backbone_name)
+
+        # IMPORTANT: never call AutoModel.from_pretrained() here. Transformers may
+        # instantiate this class under a meta-device context while loading a Dazo
+        # checkpoint. Nested from_pretrained() calls are invalid in that context.
+        backbone_cfg = self._resolve_backbone_config(config)
+        self.backbone = AutoModel.from_config(backbone_cfg)
+
         hidden = int(self.backbone.config.hidden_size)
         self.core = DazoCore(
             context_dim=hidden,
@@ -39,6 +45,36 @@ class DazoForDecision(PreTrainedModel):
         )
         if config.freeze_backbone:
             self.freeze_backbone()
+
+    @staticmethod
+    def _resolve_backbone_config(config: DazoConfig):
+        saved = getattr(config, "backbone_config", None)
+        if saved:
+            saved = dict(saved)
+            model_type = saved.pop("model_type")
+            return AutoConfig.for_model(model_type, **saved)
+
+        # Backward compatibility for checkpoints produced before backbone_config
+        # was persisted. Config loading is safe in a meta context; weight loading is not.
+        backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
+        config.backbone_config = backbone_cfg.to_dict()
+        return backbone_cfg
+
+    @classmethod
+    def from_backbone_pretrained(cls, config: DazoConfig) -> "DazoForDecision":
+        """Create a fresh Dazo model initialized from the named pretrained encoder.
+
+        Use this path for *new training*. Saved Dazo checkpoints should use the normal
+        ``DazoForDecision.from_pretrained(path_or_repo)`` API so the outer checkpoint
+        loader restores both the backbone and Dazo reasoning-core weights.
+        """
+        backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
+        config.backbone_config = backbone_cfg.to_dict()
+        model = cls(config)
+        model.backbone = AutoModel.from_pretrained(config.backbone_name, config=backbone_cfg)
+        if config.freeze_backbone:
+            model.freeze_backbone()
+        return model
 
     def freeze_backbone(self):
         for p in self.backbone.parameters():
