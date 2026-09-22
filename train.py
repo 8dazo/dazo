@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 import torch
@@ -17,6 +18,16 @@ from dazo.modeling_dazo import DazoForDecision
 
 def move(batch, device):
     return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+
+
+def parse_budgets(spec: str, max_steps: int) -> list[int]:
+    vals = sorted({int(x.strip()) for x in spec.split(",") if x.strip()})
+    vals = [x for x in vals if 1 <= x <= max_steps]
+    if max_steps not in vals:
+        vals.append(max_steps)
+    if not vals:
+        vals = [max_steps]
+    return sorted(set(vals))
 
 
 @torch.no_grad()
@@ -52,16 +63,24 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument(
+        "--depth-budgets",
+        default="1,2,3,4,6,8",
+        help="Comma-separated recurrent budgets sampled per training batch.",
+    )
     p.add_argument("--unfreeze-backbone", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
+    rng = random.Random(args.seed)
     cfg = DazoConfig(**json.loads(Path(args.config).read_text()))
     if args.max_steps is not None:
         cfg.max_steps = args.max_steps
     if args.unfreeze_backbone:
         cfg.freeze_backbone = False
+    depth_budgets = parse_budgets(args.depth_budgets, cfg.max_steps)
+    print(f"training recurrent budgets: {depth_budgets}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.backbone_name)
     collator = DazoCollator(tokenizer, cfg.context_max_length, cfg.option_max_length)
@@ -88,14 +107,16 @@ def main():
             model.backbone.eval()
         optimizer.zero_grad(set_to_none=True)
         rolling = {}
+        rolling_batches = 0
         for step, batch in enumerate(train_loader, start=1):
             batch = move(batch, device)
+            train_budget = rng.choice(depth_budgets)
             with torch.amp.autocast("cuda", enabled=device.type == "cuda", dtype=torch.bfloat16):
                 outputs = model(
                     input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
                     option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
                     option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
-                    max_steps=cfg.max_steps,
+                    max_steps=train_budget,
                 )
                 loss, parts = compute_dazo_loss(outputs, batch["labels"], batch["option_mask"], batch["is_ood"])
                 loss = loss / args.grad_accum
@@ -109,14 +130,20 @@ def main():
 
             for k, v in parts.items():
                 rolling[k] = rolling.get(k, 0.0) + float(v)
+            rolling["budget"] = rolling.get("budget", 0.0) + float(train_budget)
+            rolling_batches += 1
             if step % 50 == 0:
-                denom = 50.0
-                print(f"epoch={epoch} step={step}/{len(train_loader)} " + " ".join(f"{k}={v/denom:.4f}" for k, v in rolling.items()))
+                denom = float(max(rolling_batches, 1))
+                print(
+                    f"epoch={epoch} step={step}/{len(train_loader)} "
+                    + " ".join(f"{k}={v/denom:.4f}" for k, v in rolling.items())
+                )
                 rolling = {}
+                rolling_batches = 0
 
         if eval_loader is not None:
             metrics = evaluate(model, eval_loader, device, cfg.max_steps)
-            print(f"eval epoch={epoch}: {metrics}")
+            print(f"eval epoch={epoch} max_budget={cfg.max_steps}: {metrics}")
 
         ckpt = Path(args.output) / f"epoch-{epoch}"
         ckpt.mkdir(parents=True, exist_ok=True)
