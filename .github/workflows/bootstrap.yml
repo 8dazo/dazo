@@ -36,3 +36,5 @@ jobs:
           git diff --cached --quiet && exit 0
           git commit -m "Bootstrap Dazo v0 source"
           git push
+
+# Bootstrap trigger: source bundle is ready on main.
