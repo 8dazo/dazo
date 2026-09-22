@@ -1,0 +1,21 @@
+{
+  "backbone_name": "jhu-clsp/mmBERT-small",
+  "context_max_length": 1024,
+  "option_max_length": 32,
+  "latent_dim": 384,
+  "n_evidence_slots": 16,
+  "n_hypothesis_slots": 8,
+  "n_critic_slots": 4,
+  "n_control_slots": 4,
+  "layers_per_loop": 2,
+  "num_attention_heads": 8,
+  "dropout": 0.0,
+  "max_steps": 8,
+  "min_steps": 1,
+  "max_loop_embeddings": 32,
+  "max_rank": 256,
+  "halt_threshold": 0.65,
+  "convergence_threshold": 0.02,
+  "correctness_threshold": 0.70,
+  "freeze_backbone": true
+}
