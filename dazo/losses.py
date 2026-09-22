@@ -7,6 +7,21 @@ import torch
 import torch.nn.functional as F
 
 
+def binary_cross_entropy_probs(probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Autocast-safe BCE for heads that expose probabilities.
+
+    CUDA autocast intentionally rejects ``binary_cross_entropy`` because a preceding sigmoid can
+    produce gradients that are not safely representable in reduced precision. Dazo v0 exposes
+    probability-space halt/correctness/abstain heads, so reconstruct the corresponding float32
+    logits and use the autocast-safe BCE-with-logits kernel. The clamp matches the numerical guard
+    we already used around probability-space BCE.
+    """
+    probs32 = probs.float().clamp(1e-5, 1.0 - 1e-5)
+    target32 = target.float()
+    logits32 = torch.logit(probs32)
+    return F.binary_cross_entropy_with_logits(logits32, target32)
+
+
 def brier_loss(probs: torch.Tensor, labels: torch.Tensor, option_mask: torch.Tensor) -> torch.Tensor:
     target = F.one_hot(labels, num_classes=probs.size(-1)).to(probs.dtype)
     target = target * option_mask.to(target.dtype)
@@ -44,11 +59,11 @@ def halt_supervision(halt_probs: torch.Tensor, per_step_logits: torch.Tensor, la
         correct = per_step_logits.argmax(-1).eq(labels[:, None]).float()
         stable = torch.flip(torch.cumprod(torch.flip(correct, dims=[1]), dim=1), dims=[1])
         target = torch.maximum(correct * 0.5, stable)
-    return F.binary_cross_entropy(halt_probs.clamp(1e-5, 1 - 1e-5), target)
+    return binary_cross_entropy_probs(halt_probs, target)
 
 
 def expected_ponder_cost(halt_probs: torch.Tensor) -> torch.Tensor:
-    h = halt_probs.clamp(1e-5, 1 - 1e-5)
+    h = halt_probs.float().clamp(1e-5, 1 - 1e-5)
     survival = torch.cumprod(torch.cat([torch.ones_like(h[:, :1]), 1.0 - h[:, :-1]], dim=1), dim=1)
     stop_p = h * survival
     leftover = (1.0 - stop_p.sum(dim=1, keepdim=True)).clamp_min(0.0)
@@ -61,7 +76,7 @@ def expected_ponder_cost(halt_probs: torch.Tensor) -> torch.Tensor:
 def correctness_supervision(per_step_correctness: torch.Tensor, per_step_logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     with torch.no_grad():
         target = per_step_logits.argmax(-1).eq(labels[:, None]).float()
-    return F.binary_cross_entropy(per_step_correctness.clamp(1e-5, 1 - 1e-5), target)
+    return binary_cross_entropy_probs(per_step_correctness, target)
 
 
 def abstain_supervision(per_step_abstain: torch.Tensor, per_step_logits: torch.Tensor, labels: torch.Tensor, is_ood: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -70,7 +85,7 @@ def abstain_supervision(per_step_abstain: torch.Tensor, per_step_logits: torch.T
         target = wrong.float()
         if is_ood is not None:
             target = torch.maximum(target, is_ood[:, None].float())
-    return F.binary_cross_entropy(per_step_abstain.clamp(1e-5, 1 - 1e-5), target)
+    return binary_cross_entropy_probs(per_step_abstain, target)
 
 
 def energy_ood_loss(
