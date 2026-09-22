@@ -1,10 +1,13 @@
 {
-  "id": 10,
-  "task": "prepare_pilot",
+  "id": 11,
+  "task": "train_pilot",
   "args": {
-    "train_max_depth": 3,
-    "limit_train": 3000,
-    "limit_eval": 1000
+    "output": "/content/drive/MyDrive/DazoBridge/checkpoints/dazo-proofwriter-balanced",
+    "epochs": 1,
+    "batch_size": 4,
+    "grad_accum": 2,
+    "lr": 0.0002,
+    "depth_budgets": "1,2,3,4,6,8"
   },
-  "note": "Retry depth-aware ProofWriter preparation: strict train balance 0-3; eval preserves scarce deep examples and redistributes unused quota without duplicates."
+  "note": "Train a fresh Dazo checkpoint on the corrected depth-balanced shallow training set; keep the original pilot checkpoint untouched."
 }
