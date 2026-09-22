@@ -22,7 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install pytest
-      - name: Run core invariants
+      - name: Run core and loss invariants
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: pytest -q tests/test_core.py
+        run: pytest -q tests/test_core.py tests/test_losses.py
