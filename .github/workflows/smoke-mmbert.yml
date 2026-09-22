@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install 'transformers>=4.48' huggingface-hub safetensors
-      - name: Run real-backbone forward pass
+      - name: Run real-backbone forward and backward pass
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
@@ -34,6 +34,7 @@ jobs:
           from transformers import AutoTokenizer
           from dazo.configuration_dazo import DazoConfig
           from dazo.data import DazoCollator
+          from dazo.losses import compute_dazo_loss
           from dazo.modeling_dazo import DazoForDecision
 
           cfg = DazoConfig(
@@ -52,36 +53,60 @@ jobs:
           )
           tok = AutoTokenizer.from_pretrained(cfg.backbone_name)
           collate = DazoCollator(tok, cfg.context_max_length, cfg.option_max_length)
-          batch = collate([{
-              'state': 'A robin is a bird. All birds are animals.',
-              'instruction': 'Is a robin an animal?',
-              'type': 'choice',
-              'options': [
-                  {'id': 'true', 'text': 'entailed'},
-                  {'id': 'false', 'text': 'contradicted'},
-                  {'id': 'unknown', 'text': 'not enough information'},
-              ],
-              'label': 'true',
-          }])
-          model = DazoForDecision(cfg).eval()
-          with torch.inference_mode():
-              out = model(
-                  input_ids=batch['input_ids'],
-                  attention_mask=batch['attention_mask'],
-                  option_input_ids=batch['option_input_ids'],
-                  option_attention_mask=batch['option_attention_mask'],
-                  option_mask=batch['option_mask'],
-                  task_type=batch['task_type'],
-                  rank_ids=batch['rank_ids'],
-                  max_steps=2,
-              )
-          assert out['logits'].shape == (1, 3), out['logits'].shape
-          assert out['per_step_logits'].shape == (1, 2, 3), out['per_step_logits'].shape
+          batch = collate([
+              {
+                  'state': 'A robin is a bird. All birds are animals.',
+                  'instruction': 'Is a robin an animal?',
+                  'type': 'choice',
+                  'options': [
+                      {'id': 'true', 'text': 'entailed'},
+                      {'id': 'false', 'text': 'contradicted'},
+                      {'id': 'unknown', 'text': 'not enough information'},
+                  ],
+                  'label': 'true',
+              },
+              {
+                  'state': 'A salmon is a fish. No fish is a mammal.',
+                  'instruction': 'Is a salmon a mammal?',
+                  'type': 'choice',
+                  'options': [
+                      {'id': 'true', 'text': 'entailed'},
+                      {'id': 'false', 'text': 'contradicted'},
+                      {'id': 'unknown', 'text': 'not enough information'},
+                  ],
+                  'label': 'false',
+              },
+          ])
+          model = DazoForDecision(cfg)
+          model.train()
+          model.backbone.eval()
+          optimizer = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-4)
+          out = model(
+              input_ids=batch['input_ids'],
+              attention_mask=batch['attention_mask'],
+              option_input_ids=batch['option_input_ids'],
+              option_attention_mask=batch['option_attention_mask'],
+              option_mask=batch['option_mask'],
+              task_type=batch['task_type'],
+              rank_ids=batch['rank_ids'],
+              max_steps=2,
+          )
+          assert out['logits'].shape == (2, 3), out['logits'].shape
+          assert out['per_step_logits'].shape == (2, 2, 3), out['per_step_logits'].shape
           assert torch.isfinite(out['logits']).all()
-          assert torch.allclose(out['probs'].sum(-1), torch.ones(1), atol=1e-5)
-          print('Dazo/mmBERT smoke OK')
-          print('probs=', out['probs'].tolist())
-          print('convergence=', out['convergence'].tolist())
+          assert torch.allclose(out['probs'].sum(-1), torch.ones(2), atol=1e-5)
+          loss, parts = compute_dazo_loss(out, batch['labels'], batch['option_mask'], batch['is_ood'])
+          assert torch.isfinite(loss), loss
+          loss.backward()
+          core_grads = [p.grad for p in model.core.parameters() if p.requires_grad]
+          assert core_grads and any(g is not None and torch.isfinite(g).all() for g in core_grads)
+          assert all(p.grad is None for p in model.backbone.parameters())
+          optimizer.step()
+          print('Dazo/mmBERT train smoke OK')
+          print('loss=', float(loss.detach()))
+          print('parts=', {k: float(v) for k, v in parts.items()})
+          print('probs=', out['probs'].detach().tolist())
+          print('convergence=', out['convergence'].detach().tolist())
           print('trainable_params=', sum(p.numel() for p in model.parameters() if p.requires_grad))
           print('total_params=', sum(p.numel() for p in model.parameters()))
           PY
