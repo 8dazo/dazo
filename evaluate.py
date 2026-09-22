@@ -48,6 +48,35 @@ def resolve_data_path(spec: str) -> str:
     return str(path.resolve())
 
 
+def _assert_index_range(name: str, tensor: torch.Tensor, size: int) -> None:
+    if tensor.numel() == 0:
+        return
+    lo = int(tensor.min().item())
+    hi = int(tensor.max().item())
+    if lo < 0 or hi >= size:
+        raise RuntimeError(
+            f"{name} index out of range before CUDA: min={lo} max={hi} valid=[0,{size - 1}]"
+        )
+
+
+def _preflight_batch(model: DazoForDecision, batch: dict, batch_index: int) -> None:
+    vocab_size = int(model.backbone.get_input_embeddings().num_embeddings)
+    task_size = int(model.core.compressor.task_emb.num_embeddings)
+    rank_size = int(model.core.decoder.rank_emb.num_embeddings)
+    _assert_index_range("input_ids", batch["input_ids"], vocab_size)
+    _assert_index_range("option_input_ids", batch["option_input_ids"], vocab_size)
+    _assert_index_range("task_type", batch["task_type"], task_size)
+    _assert_index_range("rank_ids", batch["rank_ids"], rank_size)
+    if batch_index == 0:
+        print(
+            "preflight "
+            f"vocab_size={vocab_size} tokenizer_input_max={int(batch['input_ids'].max())} "
+            f"option_input_max={int(batch['option_input_ids'].max())} "
+            f"task_range=({int(batch['task_type'].min())},{int(batch['task_type'].max())}) "
+            f"rank_range=({int(batch['rank_ids'].min())},{int(batch['rank_ids'].max())})"
+        )
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model", required=True)
@@ -62,13 +91,34 @@ def main():
     print(f"model={model_ref}")
     print(f"data={data_ref}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = DazoForDecision.from_pretrained(model_ref).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(model_ref)
+    # Load the Dazo checkpoint itself directly, but always use the original
+    # backbone tokenizer. Loading AutoTokenizer from a custom Dazo checkpoint
+    # can make Transformers inspect Dazo's auto_map/custom code and select an
+    # incompatible tokenizer/config path. Training also uses backbone_name.
+    model = DazoForDecision.from_pretrained(model_ref).eval()
+    tokenizer_ref = model.config.backbone_name
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref)
+    print(
+        f"tokenizer={tokenizer_ref} class={tokenizer.__class__.__name__} "
+        f"len={len(tokenizer)} model_vocab={model.backbone.get_input_embeddings().num_embeddings}"
+    )
+
     collator = DazoCollator(tokenizer, model.config.context_max_length, model.config.option_max_length)
-    loader = DataLoader(JsonlDecisionDataset(data_ref), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
+    loader = DataLoader(
+        JsonlDecisionDataset(data_ref),
+        batch_size=args.batch_size,
+        shuffle=False,
+        collate_fn=collator,
+    )
     loops = sorted(set(int(x) for x in args.loops.split(",") if x.strip()))
     max_loop = max(loops)
+    if min(loops) < 1 or max_loop > model.core.reasoner.max_loop_embeddings:
+        raise SystemExit(
+            f"loop budgets {loops} exceed valid range 1..{model.core.reasoner.max_loop_embeddings}"
+        )
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
 
     stats = {l: {"correct": 0, "total": 0, "probs": [], "labels": []} for l in loops}
     by_depth = {l: {} for l in loops}
@@ -76,7 +126,10 @@ def main():
     started = time.perf_counter()
 
     with torch.no_grad():
-        for batch in loader:
+        for batch_index, batch in enumerate(loader):
+            # Validate all embedding indices while tensors are still on CPU so an
+            # invalid value produces a useful Python error instead of poisoning CUDA.
+            _preflight_batch(model, batch, batch_index)
             metadata = batch.pop("metadata")
             labels = batch.pop("labels").to(device)
             batch.pop("is_ood", None)
@@ -106,6 +159,7 @@ def main():
     report = {
         "model": model_ref,
         "data": data_ref,
+        "tokenizer": tokenizer_ref,
         "loop_budgets": loops,
         "examples_per_second": sum(x["total"] for x in stats.values()) / max(len(loops), 1) / max(elapsed, 1e-9),
         "loops": {},
@@ -122,7 +176,11 @@ def main():
 
     correctness = torch.cat(correctness_rows, dim=0).bool()
     if correctness.numel():
-        ever_correct_before_final = correctness[:, :-1].any(dim=1) if correctness.size(1) > 1 else torch.zeros(correctness.size(0), dtype=torch.bool)
+        ever_correct_before_final = (
+            correctness[:, :-1].any(dim=1)
+            if correctness.size(1) > 1
+            else torch.zeros(correctness.size(0), dtype=torch.bool)
+        )
         final_wrong = ~correctness[:, -1]
         overthought = ever_correct_before_final & final_wrong
         report["overthinking_rate"] = float(overthought.float().mean())
