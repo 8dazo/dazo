@@ -7,9 +7,11 @@ import time
 from pathlib import Path
 
 import torch
+from safetensors.torch import load_file
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
+from dazo.configuration_dazo import DazoConfig
 from dazo.data import DazoCollator, JsonlDecisionDataset
 from dazo.losses import expected_calibration_error
 from dazo.modeling_dazo import DazoForDecision
@@ -46,6 +48,48 @@ def resolve_data_path(spec: str) -> str:
     if not path.is_file():
         raise SystemExit(f"Evaluation data must be a JSONL file: {path}")
     return str(path.resolve())
+
+
+def _load_safetensor_state(path: Path) -> dict[str, torch.Tensor]:
+    single = path / "model.safetensors"
+    if single.exists():
+        return load_file(str(single), device="cpu")
+
+    index_path = path / "model.safetensors.index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text())
+        state: dict[str, torch.Tensor] = {}
+        for filename in sorted(set(index["weight_map"].values())):
+            state.update(load_file(str(path / filename), device="cpu"))
+        return state
+
+    raise FileNotFoundError(f"No safetensors checkpoint found in {path}")
+
+
+def load_dazo_checkpoint(model_ref: str) -> DazoForDecision:
+    """Reload a local Dazo checkpoint without Transformers' meta-device restore path.
+
+    Training builds mmBERT through the normal pretrained path. Rebuilding that exact
+    backbone and then applying Dazo's saved state dict keeps ModernBERT's runtime
+    buffers/derived state consistent while restoring all trained Dazo weights.
+    """
+    path = Path(model_ref)
+    if not path.is_dir():
+        return DazoForDecision.from_pretrained(model_ref).eval()
+
+    cfg = DazoConfig.from_pretrained(path)
+    model = DazoForDecision.from_backbone_pretrained(cfg)
+    state = _load_safetensor_state(path)
+    incompatible = model.load_state_dict(state, strict=False)
+    missing = [k for k in incompatible.missing_keys if not k.endswith("role_ids")]
+    unexpected = list(incompatible.unexpected_keys)
+    if missing or unexpected:
+        raise RuntimeError(
+            "Dazo checkpoint state mismatch: "
+            f"missing={missing[:20]} unexpected={unexpected[:20]}"
+        )
+    print(f"checkpoint_restore=direct_safetensors tensors={len(state)}")
+    return model.eval()
 
 
 def _assert_index_range(name: str, tensor: torch.Tensor, size: int) -> None:
@@ -91,11 +135,7 @@ def main():
     print(f"model={model_ref}")
     print(f"data={data_ref}")
 
-    # Load the Dazo checkpoint itself directly, but always use the original
-    # backbone tokenizer. Loading AutoTokenizer from a custom Dazo checkpoint
-    # can make Transformers inspect Dazo's auto_map/custom code and select an
-    # incompatible tokenizer/config path. Training also uses backbone_name.
-    model = DazoForDecision.from_pretrained(model_ref).eval()
+    model = load_dazo_checkpoint(model_ref)
     tokenizer_ref = model.config.backbone_name
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref)
     print(
@@ -127,8 +167,6 @@ def main():
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
-            # Validate all embedding indices while tensors are still on CPU so an
-            # invalid value produces a useful Python error instead of poisoning CUDA.
             _preflight_batch(model, batch, batch_index)
             metadata = batch.pop("metadata")
             labels = batch.pop("labels").to(device)
