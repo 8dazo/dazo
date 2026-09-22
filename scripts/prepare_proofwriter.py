@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""Convert ProofWriter to Dazo JSONL.
-
-This is the first scientific benchmark for Dazo because it exposes gold reasoning depth. Train on
-shallow examples, then test deeper examples while increasing Dazo's recurrent loop count.
-"""
+"""Convert ProofWriter to Dazo JSONL without materializing the full ~1.2 GB dataset."""
 import argparse
 import json
 from pathlib import Path
@@ -29,7 +25,10 @@ def main():
     args = p.parse_args()
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    ds = load_dataset("tasksource/proofwriter")
+
+    # Streaming keeps Colab/local pilots small: ProofWriter is ~1.2 GB materialized,
+    # while our first experiments only need tens of thousands of rows.
+    ds = load_dataset("tasksource/proofwriter", streaming=True)
     options = [
         {"id": "true", "text": "The statement is entailed by the facts and rules."},
         {"id": "false", "text": "The statement is contradicted by the facts and rules."},
@@ -49,11 +48,19 @@ def main():
                     break
                 item = {
                     "state": row["theory"],
-                    "instruction": "Using only the supplied facts and rules, decide whether the query is true, false, or unknown. Query: " + row["question"],
+                    "instruction": (
+                        "Using only the supplied facts and rules, decide whether the query is "
+                        "true, false, or unknown. Query: " + row["question"]
+                    ),
                     "type": "choice",
                     "options": options,
                     "label": normalize_answer(row["answer"]),
-                    "metadata": {"id": row["id"], "depth": depth, "maxD": int(row.get("maxD", 0))},
+                    "metadata": {
+                        "id": row["id"],
+                        "depth": depth,
+                        "maxD": int(row.get("maxD", 0)),
+                        "config": row.get("config"),
+                    },
                 }
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
                 n += 1
