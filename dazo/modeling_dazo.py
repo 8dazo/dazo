@@ -18,6 +18,9 @@ from .core import DazoCore
 class DazoForDecision(PreTrainedModel):
     config_class = DazoConfig
     base_model_prefix = "dazo"
+    # Transformers 5.x consults this mapping while finalizing meta-device loads.
+    # Dazo has no tied output/input weights, so the correct mapping is empty.
+    all_tied_weights_keys = {}
 
     def __init__(self, config: DazoConfig):
         super().__init__(config)
