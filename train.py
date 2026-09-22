@@ -51,6 +51,17 @@ def evaluate(model, loader, device, max_steps):
     return {"loss": loss_sum / max(total, 1), "accuracy": correct / max(total, 1)}
 
 
+def choose_amp(device: torch.device) -> tuple[bool, torch.dtype, bool]:
+    if device.type != "cuda":
+        return False, torch.float32, False
+    major, _minor = torch.cuda.get_device_capability()
+    # BF16 is a native Tensor Core path on Ampere (SM80+) and newer. T4 is
+    # Turing (SM75), so prefer FP16 even if a software stack reports BF16 support.
+    use_bf16 = major >= 8 and torch.cuda.is_bf16_supported()
+    dtype = torch.bfloat16 if use_bf16 else torch.float16
+    return True, dtype, dtype == torch.float16
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--config", default="configs/dazo-v0-small.json")
@@ -92,9 +103,7 @@ def main():
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    amp_enabled = device.type == "cuda"
-    amp_dtype = torch.bfloat16 if amp_enabled and torch.cuda.is_bf16_supported() else torch.float16
-    scaler_enabled = amp_enabled and amp_dtype == torch.float16
+    amp_enabled, amp_dtype, scaler_enabled = choose_amp(device)
     print(
         f"device={device} amp={amp_enabled} "
         f"amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}"
