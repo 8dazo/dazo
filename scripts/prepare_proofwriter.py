@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""Convert ProofWriter to depth-balanced Dazo JSONL without materializing the full dataset."""
+"""Convert ProofWriter to depth-aware Dazo JSONL without materializing the full dataset."""
 import argparse
 import json
+import random
 from collections import Counter
 from pathlib import Path
 
@@ -51,43 +52,114 @@ def convert_row(row, options):
     }
 
 
-def write_balanced(stream, target: Path, depths: list[int], limit: int, options, seed: int):
-    target_quota = quotas(limit, depths)
-    counts = Counter()
-    labels = Counter()
-    total = 0
-
-    # Shuffle the streaming source to reduce ordering bias within each depth. The
-    # explicit per-depth quotas guarantee coverage even if the dataset is globally
-    # grouped by QDep and the shuffle buffer cannot span all groups.
-    stream = stream.shuffle(seed=seed, buffer_size=10000)
-
+def _write_items(target: Path, items: list[dict]):
+    counts = Counter(int(x["metadata"]["depth"]) for x in items)
+    labels = Counter(x["label"] for x in items)
     with target.open("w", encoding="utf-8") as f:
-        for row in stream:
-            depth = int(row.get("QDep", 0))
-            if depth not in target_quota or counts[depth] >= target_quota[depth]:
-                continue
-            item = convert_row(row, options)
+        for item in items:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
-            counts[depth] += 1
-            labels[item["label"]] += 1
-            total += 1
-            if limit > 0 and total >= limit:
-                break
-            if all(counts[d] >= target_quota[d] for d in depths):
-                break
-
-    missing = {d: target_quota[d] - counts[d] for d in depths if counts[d] < target_quota[d]}
-    if missing:
-        raise RuntimeError(f"could not fill depth quotas for {target.name}: {missing}")
-
     print(
         target.stem,
-        total,
+        len(items),
         target,
         "depth_counts=", dict(sorted(counts.items())),
         "label_counts=", dict(sorted(labels.items())),
     )
+
+
+def write_balanced_train(stream, target: Path, depths: list[int], limit: int, options, seed: int):
+    """Strictly balance training across the allowed shallow depths."""
+    target_quota = quotas(limit, depths)
+    counts = Counter()
+    items = []
+    stream = stream.shuffle(seed=seed, buffer_size=10000)
+    for row in stream:
+        depth = int(row.get("QDep", 0))
+        if depth not in target_quota or counts[depth] >= target_quota[depth]:
+            continue
+        items.append(convert_row(row, options))
+        counts[depth] += 1
+        if limit > 0 and len(items) >= limit:
+            break
+        if all(counts[d] >= target_quota[d] for d in depths):
+            break
+
+    missing = {d: target_quota[d] - counts[d] for d in depths if counts[d] < target_quota[d]}
+    if missing:
+        raise RuntimeError(f"could not fill train depth quotas for {target.name}: {missing}")
+    random.Random(seed).shuffle(items)
+    _write_items(target, items)
+
+
+def _waterfill_counts(available: dict[int, int], total: int, depths: list[int]) -> dict[int, int]:
+    """Allocate total examples as evenly as availability permits.
+
+    Rare deep depths keep every available example; their unused quota is redistributed
+    to better-populated depths. This avoids duplicating scarce deep examples merely to
+    make a table look perfectly balanced.
+    """
+    if total <= 0:
+        return {d: available.get(d, 0) for d in depths}
+    target = {d: 0 for d in depths}
+    remaining = min(total, sum(available.get(d, 0) for d in depths))
+    active = set(depths)
+    while remaining > 0 and active:
+        progressed = False
+        for d in sorted(active):
+            if remaining <= 0:
+                break
+            if target[d] < available.get(d, 0):
+                target[d] += 1
+                remaining -= 1
+                progressed = True
+            else:
+                active.discard(d)
+        if not progressed:
+            break
+    return target
+
+
+def write_depth_aware_eval(stream, target: Path, depths: list[int], limit: int, options, seed: int):
+    """Collect enough candidates per depth, then water-fill around scarce depths."""
+    # We never need more than `limit` examples from any one depth. Keeping bounded
+    # per-depth reservoirs allows a complete split scan without materializing the
+    # whole ProofWriter validation/test split.
+    cap = max(limit, 1) if limit > 0 else 10000
+    reservoirs = {d: [] for d in depths}
+    seen = Counter()
+    rng = random.Random(seed)
+
+    for row in stream:
+        depth = int(row.get("QDep", 0))
+        if depth not in reservoirs:
+            continue
+        seen[depth] += 1
+        item = convert_row(row, options)
+        bucket = reservoirs[depth]
+        if len(bucket) < cap:
+            bucket.append(item)
+        else:
+            # Standard reservoir sampling keeps a uniform bounded sample even when
+            # a depth has far more rows than we need.
+            j = rng.randrange(seen[depth])
+            if j < cap:
+                bucket[j] = item
+
+    available = {d: len(reservoirs[d]) for d in depths}
+    allocation = _waterfill_counts(available, limit, depths)
+    items = []
+    for d in depths:
+        bucket = reservoirs[d]
+        rng.shuffle(bucket)
+        items.extend(bucket[: allocation[d]])
+    rng.shuffle(items)
+
+    absent = [d for d in depths if available[d] == 0]
+    if absent:
+        print(f"note: {target.stem} has no examples for requested depths {absent}; excluding them")
+    print("available_by_depth=", dict(sorted(available.items())))
+    print("selected_by_depth=", dict(sorted(allocation.items())))
+    _write_items(target, items)
 
 
 def main():
@@ -112,15 +184,15 @@ def main():
     train_depths = list(range(args.train_max_depth + 1))
     eval_depths = parse_depths(args.eval_depths)
 
-    write_balanced(
+    write_balanced_train(
         ds["train"], out / "train.jsonl", train_depths, args.limit_train,
         options, args.seed,
     )
-    write_balanced(
+    write_depth_aware_eval(
         ds["validation"], out / "validation.jsonl", eval_depths, args.limit_eval,
         options, args.seed + 1,
     )
-    write_balanced(
+    write_depth_aware_eval(
         ds["test"], out / "test.jsonl", eval_depths, args.limit_eval,
         options, args.seed + 2,
     )
