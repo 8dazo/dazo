@@ -1,10 +1,12 @@
 {
-  "id": 4,
-  "task": "prepare_pilot",
+  "id": 5,
+  "task": "train_pilot",
   "args": {
-    "train_max_depth": 3,
-    "limit_train": 3000,
-    "limit_eval": 1000
+    "epochs": 1,
+    "batch_size": 4,
+    "grad_accum": 2,
+    "lr": 0.0002,
+    "depth_budgets": "1,2,3,4,6,8"
   },
-  "note": "Prepare the ProofWriter pilot dataset in the live Colab runtime after tests passed."
+  "note": "Train the Dazo ProofWriter pilot on the live T4 and persist the checkpoint to MyDrive/DazoBridge/checkpoints/dazo-proofwriter-pilot."
 }
