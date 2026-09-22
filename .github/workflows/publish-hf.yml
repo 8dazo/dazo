@@ -1,0 +1,65 @@
+name: Publish Dazo to Hugging Face
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-dazo-huggingface
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Hugging Face CLI
+        run: |
+          curl -LsSf https://hf.co/cli/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build Hub upload directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .hf_publish
+          mkdir -p .hf_publish
+
+          # Hugging Face displays README.md as the model card.
+          if [ -f MODEL_CARD.md ]; then
+            cp MODEL_CARD.md .hf_publish/README.md
+          else
+            cp README.md .hf_publish/README.md
+          fi
+
+          for file in LICENSE pyproject.toml; do
+            if [ -f "$file" ]; then
+              cp "$file" .hf_publish/
+            fi
+          done
+
+          for dir in dazo configs research; do
+            if [ -d "$dir" ]; then
+              cp -R "$dir" .hf_publish/
+            fi
+          done
+
+          # When a trained checkpoint exists, publish its Hugging Face files at
+          # the model-repository root so AutoModel.from_pretrained can load it.
+          if [ -d outputs/dazo-proofwriter/final ]; then
+            cp -R outputs/dazo-proofwriter/final/. .hf_publish/
+          fi
+
+          find .hf_publish -maxdepth 3 -type f | sort
+
+      - name: Publish to d2v1shx/dazo with OIDC
+        env:
+          HF_OIDC_RESOURCE: d2v1shx/dazo
+        run: |
+          hf upload d2v1shx/dazo .hf_publish . \
+            --commit-message "Publish Dazo from GitHub ${GITHUB_SHA::7}"
