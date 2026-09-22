@@ -92,13 +92,21 @@ def main():
         eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    amp_enabled = device.type == "cuda"
+    amp_dtype = torch.bfloat16 if amp_enabled and torch.cuda.is_bf16_supported() else torch.float16
+    scaler_enabled = amp_enabled and amp_dtype == torch.float16
+    print(
+        f"device={device} amp={amp_enabled} "
+        f"amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}"
+    )
+
     model = DazoForDecision(cfg).to(device)
     if args.unfreeze_backbone:
         model.unfreeze_backbone()
 
     params = [x for x in model.parameters() if x.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
     for epoch in range(1, args.epochs + 1):
@@ -111,7 +119,7 @@ def main():
         for step, batch in enumerate(train_loader, start=1):
             batch = move(batch, device)
             train_budget = rng.choice(depth_budgets)
-            with torch.amp.autocast("cuda", enabled=device.type == "cuda", dtype=torch.bfloat16):
+            with torch.amp.autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
                 outputs = model(
                     input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
                     option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
