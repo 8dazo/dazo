@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+outputs/
+data/proofwriter/
+data/banking77/
+wandb/
+.DS_Store
