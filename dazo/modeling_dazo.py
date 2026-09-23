@@ -1,8 +1,8 @@
 """Dazo Hugging Face wrapper.
 
-The same encoder is reused for context and option semantics. Dazo v0.1 can add a direct
-option-conditioned context compatibility score as a learnable base decision, while the recurrent
-latent core acts as a residual refinement. The direct path is permutation-equivariant over options.
+Dazo keeps evidence, query, and candidate options as distinct streams. Newer checkpoints can
+query-condition every candidate before evidence matching, while the recurrent latent core acts
+as a residual refinement. The design remains permutation-equivariant over options.
 """
 from __future__ import annotations
 
@@ -24,9 +24,6 @@ class DazoForDecision(PreTrainedModel):
 
     def __init__(self, config: DazoConfig):
         super().__init__(config)
-
-        # Never call AutoModel.from_pretrained() here. Transformers may instantiate
-        # this class under a meta-device context while loading a Dazo checkpoint.
         backbone_cfg = self._resolve_backbone_config(config)
         self.backbone = AutoModel.from_config(backbone_cfg)
 
@@ -46,19 +43,27 @@ class DazoForDecision(PreTrainedModel):
             max_rank=config.max_rank,
         )
 
-        # Backward-compatible architecture flag: old checkpoints omit this and
-        # therefore retain the original latent-only scoring path.
+        if config.query_conditioning:
+            heads = self._valid_heads(hidden, config.num_attention_heads)
+            self.query_norm = nn.LayerNorm(hidden)
+            self.query_option_norm = nn.LayerNorm(hidden)
+            self.query_cross_attn = nn.MultiheadAttention(
+                hidden, heads, dropout=config.dropout, batch_first=True
+            )
+            self.query_fuse = nn.Sequential(
+                nn.LayerNorm(hidden * 4),
+                nn.Linear(hidden * 4, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, hidden),
+            )
+            self.query_fuse_norm = nn.LayerNorm(hidden)
+
         if config.base_compatibility:
-            heads = min(config.num_attention_heads, hidden)
-            while heads > 1 and hidden % heads != 0:
-                heads -= 1
+            heads = self._valid_heads(hidden, config.num_attention_heads)
             self.base_context_norm = nn.LayerNorm(hidden)
             self.base_option_norm = nn.LayerNorm(hidden)
             self.base_cross_attn = nn.MultiheadAttention(
-                hidden,
-                heads,
-                dropout=config.dropout,
-                batch_first=True,
+                hidden, heads, dropout=config.dropout, batch_first=True
             )
             self.base_pair_score = nn.Sequential(
                 nn.LayerNorm(hidden * 4),
@@ -71,20 +76,25 @@ class DazoForDecision(PreTrainedModel):
             self.freeze_backbone()
 
     @staticmethod
+    def _valid_heads(hidden: int, requested: int) -> int:
+        heads = min(requested, hidden)
+        while heads > 1 and hidden % heads != 0:
+            heads -= 1
+        return heads
+
+    @staticmethod
     def _resolve_backbone_config(config: DazoConfig):
         saved = getattr(config, "backbone_config", None)
         if saved:
             saved = dict(saved)
             model_type = saved.pop("model_type")
             return AutoConfig.for_model(model_type, **saved)
-
         backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
         config.backbone_config = backbone_cfg.to_dict()
         return backbone_cfg
 
     @classmethod
     def from_backbone_pretrained(cls, config: DazoConfig) -> "DazoForDecision":
-        """Create a fresh Dazo model initialized from the named pretrained encoder."""
         backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
         config.backbone_config = backbone_cfg.to_dict()
         model = cls(config)
@@ -106,12 +116,6 @@ class DazoForDecision(PreTrainedModel):
         return self
 
     def unfreeze_last_backbone_layers(self, n: int):
-        """Unfreeze the top N transformer layers while leaving embeddings/lower layers frozen.
-
-        ModernBERT parameter names contain ``layers.<index>.``. The implementation is
-        deliberately name-based so it also works for compatible encoder wrappers exposing
-        the same common layer naming convention.
-        """
         n = int(n)
         if n <= 0:
             return self
@@ -137,17 +141,32 @@ class DazoForDecision(PreTrainedModel):
         w = mask.to(hidden.dtype).unsqueeze(-1)
         return (hidden * w).sum(1) / w.sum(1).clamp_min(1.0)
 
-    def _encode_options(
-        self,
-        option_input_ids: torch.Tensor,
-        option_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def _encode_options(self, option_input_ids: torch.Tensor, option_attention_mask: torch.Tensor) -> torch.Tensor:
         bsz, nopt, length = option_input_ids.shape
         flat_ids = option_input_ids.reshape(bsz * nopt, length)
         flat_mask = option_attention_mask.reshape(bsz * nopt, length)
         out = self.backbone(input_ids=flat_ids, attention_mask=flat_mask).last_hidden_state
         pooled = self._mean_pool(out, flat_mask)
         return pooled.reshape(bsz, nopt, -1)
+
+    def _condition_options_on_query(
+        self,
+        option_hidden: torch.Tensor,
+        query_hidden: torch.Tensor,
+        query_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        options = self.query_option_norm(option_hidden)
+        query = self.query_norm(query_hidden)
+        attended, _ = self.query_cross_attn(
+            options,
+            query,
+            query,
+            key_padding_mask=~query_attention_mask.bool(),
+            need_weights=False,
+        )
+        pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
+        update = self.query_fuse(pair)
+        return self.query_fuse_norm(option_hidden + update)
 
     def _base_compatibility_logits(
         self,
@@ -156,7 +175,6 @@ class DazoForDecision(PreTrainedModel):
         option_hidden: torch.Tensor,
         option_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Direct option-conditioned compatibility score over token-level evidence."""
         options = self.base_option_norm(option_hidden)
         context = self.base_context_norm(context_hidden)
         attended, _ = self.base_cross_attn(
@@ -166,30 +184,20 @@ class DazoForDecision(PreTrainedModel):
             key_padding_mask=~attention_mask.bool(),
             need_weights=False,
         )
-        pair = torch.cat(
-            [options, attended, options * attended, (options - attended).abs()],
-            dim=-1,
-        )
+        pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
         logits = self.base_pair_score(pair).squeeze(-1)
         return logits.masked_fill(~option_mask.bool(), -1e4)
 
-    def _apply_base_compatibility(
-        self,
-        out,
-        base_logits: torch.Tensor,
-        option_mask: torch.Tensor,
-    ):
+    def _apply_base_compatibility(self, out, base_logits: torch.Tensor, option_mask: torch.Tensor):
         scale = float(self.config.recurrent_logit_scale)
         per_step_logits = base_logits[:, None, :] + scale * out.per_step_logits
         step_mask = option_mask[:, None, :].bool().expand_as(per_step_logits)
         per_step_probs = masked_softmax(per_step_logits, step_mask)
-
         selected = out.selected_step.long().clamp_min(1) - 1
         batch = torch.arange(base_logits.size(0), device=base_logits.device)
         logits = per_step_logits[batch, selected]
         probs = per_step_probs[batch, selected]
         energy = -torch.logsumexp(logits.float().masked_fill(~option_mask.bool(), -1e4), dim=-1)
-
         out.per_step_logits = per_step_logits
         out.per_step_probs = per_step_probs
         out.logits = logits
@@ -204,6 +212,8 @@ class DazoForDecision(PreTrainedModel):
         option_input_ids: torch.Tensor,
         option_attention_mask: torch.Tensor,
         option_mask: torch.Tensor,
+        query_input_ids: Optional[torch.Tensor] = None,
+        query_attention_mask: Optional[torch.Tensor] = None,
         task_type: Optional[torch.Tensor] = None,
         rank_ids: Optional[torch.Tensor] = None,
         max_steps: Optional[int] = None,
@@ -216,9 +226,22 @@ class DazoForDecision(PreTrainedModel):
     ):
         context = self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         options = self._encode_options(option_input_ids, option_attention_mask)
+        reasoning_context = context
+        reasoning_mask = attention_mask.bool()
+
+        if self.config.query_conditioning:
+            if query_input_ids is None or query_attention_mask is None:
+                raise ValueError("query_conditioning=True requires query_input_ids and query_attention_mask")
+            query_hidden = self.backbone(
+                input_ids=query_input_ids, attention_mask=query_attention_mask
+            ).last_hidden_state
+            options = self._condition_options_on_query(options, query_hidden, query_attention_mask)
+            reasoning_context = torch.cat([query_hidden, context], dim=1)
+            reasoning_mask = torch.cat([query_attention_mask.bool(), attention_mask.bool()], dim=1)
+
         out = self.core(
-            context_hidden=context,
-            context_mask=attention_mask.bool(),
+            context_hidden=reasoning_context,
+            context_mask=reasoning_mask,
             option_hidden=options,
             option_mask=option_mask.bool(),
             task_type=task_type,
@@ -227,20 +250,11 @@ class DazoForDecision(PreTrainedModel):
             min_steps=min_steps or self.config.min_steps,
             adaptive=adaptive,
             halt_threshold=halt_threshold if halt_threshold is not None else self.config.halt_threshold,
-            convergence_threshold=(
-                convergence_threshold
-                if convergence_threshold is not None
-                else self.config.convergence_threshold
-            ),
-            correctness_threshold=(
-                correctness_threshold
-                if correctness_threshold is not None
-                else self.config.correctness_threshold
-            ),
+            convergence_threshold=(convergence_threshold if convergence_threshold is not None else self.config.convergence_threshold),
+            correctness_threshold=(correctness_threshold if correctness_threshold is not None else self.config.correctness_threshold),
         )
 
         if self.config.base_compatibility:
             base_logits = self._base_compatibility_logits(context, attention_mask, options, option_mask)
             out = self._apply_base_compatibility(out, base_logits, option_mask)
-
         return out.to_dict()
