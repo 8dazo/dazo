@@ -31,14 +31,12 @@ class DazoConfig(PretrainedConfig):
         convergence_threshold: float = 0.02,
         correctness_threshold: float = 0.70,
         freeze_backbone: bool = True,
+        base_compatibility: bool = False,
+        recurrent_logit_scale: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.backbone_name = backbone_name
-        # Persist the encoder architecture inside Dazo's config. This lets
-        # from_pretrained() construct the backbone with AutoModel.from_config()
-        # while Transformers is in its meta-device loading context, then load
-        # the actual backbone weights from the Dazo checkpoint state dict.
         self.backbone_config = backbone_config
         self.context_max_length = context_max_length
         self.option_max_length = option_max_length
@@ -58,6 +56,11 @@ class DazoConfig(PretrainedConfig):
         self.convergence_threshold = convergence_threshold
         self.correctness_threshold = correctness_threshold
         self.freeze_backbone = freeze_backbone
+        # Old checkpoints omit this flag and therefore retain the original
+        # latent-only decoder. New configs can opt into the learnable direct
+        # context-option compatibility base score.
+        self.base_compatibility = base_compatibility
+        self.recurrent_logit_scale = recurrent_logit_scale
         self.architectures = ["DazoForDecision"]
         self.auto_map = {
             "AutoConfig": "configuration_dazo.DazoConfig",
