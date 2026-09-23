@@ -88,16 +88,23 @@ def _preflight_batch(model: DazoForDecision, batch: dict, batch_index: int) -> N
     if "query_input_ids" in batch:
         _assert_index_range("query_input_ids", batch["query_input_ids"], vocab_size)
     _assert_index_range("option_input_ids", batch["option_input_ids"], vocab_size)
+    if "joint_input_ids" in batch:
+        _assert_index_range("joint_input_ids", batch["joint_input_ids"], vocab_size)
+        _assert_index_range("marker_positions", batch["marker_positions"], batch["joint_input_ids"].size(-1))
     _assert_index_range("task_type", batch["task_type"], task_size)
     _assert_index_range("rank_ids", batch["rank_ids"], rank_size)
     if batch_index == 0:
         qmax = int(batch["query_input_ids"].max()) if "query_input_ids" in batch else -1
+        joint = (
+            f" joint_len={batch['joint_input_ids'].size(-1)} marker_max={int(batch['marker_positions'].max())}"
+            if "joint_input_ids" in batch else ""
+        )
         print(
             "preflight "
             f"vocab_size={vocab_size} evidence_input_max={int(batch['input_ids'].max())} "
             f"query_input_max={qmax} option_input_max={int(batch['option_input_ids'].max())} "
             f"task_range=({int(batch['task_type'].min())},{int(batch['task_type'].max())}) "
-            f"rank_range=({int(batch['rank_ids'].min())},{int(batch['rank_ids'].max())})"
+            f"rank_range=({int(batch['rank_ids'].min())},{int(batch['rank_ids'].max())}){joint}"
         )
 
 
@@ -125,6 +132,8 @@ def main():
         context_max_length=model.config.context_max_length,
         option_max_length=model.config.option_max_length,
         query_max_length=getattr(model.config, "query_max_length", 128),
+        joint_candidate_encoding=getattr(model.config, "joint_candidate_encoding", False),
+        joint_max_length=getattr(model.config, "joint_max_length", model.config.context_max_length),
     )
     loader = DataLoader(JsonlDecisionDataset(data_ref), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
     loops = sorted(set(int(x) for x in args.loops.split(",") if x.strip()))
