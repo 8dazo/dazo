@@ -1,10 +1,13 @@
 {
-  "id": 31,
-  "task": "prepare_pilot",
+  "id": 32,
+  "task": "train_pilot",
   "args": {
-    "train_max_depth": 3,
-    "limit_train": 64,
-    "limit_eval": 64
+    "output": "/content/dazo/outputs/dazo-micro-querycond",
+    "epochs": 10,
+    "batch_size": 2,
+    "grad_accum": 4,
+    "lr": 0.001,
+    "depth_budgets": "1"
   },
-  "note": "Rebuild ProofWriter micro benchmark with explicit query/theory separation for the Laya-inspired Dazo path."
+  "note": "A/B micro test: protected query stream + query-conditioned options + 2048-token evidence, frozen mmBERT, one recurrent loop."
 }
