@@ -34,10 +34,17 @@ class JsonlDecisionDataset(Dataset):
 
 
 class DazoCollator:
-    def __init__(self, tokenizer, context_max_length: int = 1024, option_max_length: int = 32):
+    def __init__(
+        self,
+        tokenizer,
+        context_max_length: int = 1024,
+        option_max_length: int = 32,
+        query_max_length: int = 128,
+    ):
         self.tokenizer = tokenizer
         self.context_max_length = context_max_length
         self.option_max_length = option_max_length
+        self.query_max_length = query_max_length
 
     @staticmethod
     def _normalize_options(options: Iterable[Any]) -> List[Dict[str, Any]]:
@@ -54,15 +61,24 @@ class DazoCollator:
         return out
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-        contexts, options_by_row, labels, task_types, metadata, is_ood = [], [], [], [], [], []
+        evidences, queries, options_by_row, labels, task_types, metadata, is_ood = [], [], [], [], [], [], []
         max_k = 0
         for row in batch:
             task = str(row.get("type", "choice")).lower()
             if task not in TASK_TYPES:
                 raise ValueError(f"unknown decision type: {task}")
+
             instruction = _text(row.get("instruction", "Choose the best option."))
             state = _text(row.get("state", ""))
-            contexts.append(f"Instruction: {instruction}\nState:\n{state}")
+            query = _text(row.get("query", instruction))
+
+            # Keep the decision/question head in its own protected stream. This is
+            # deliberately inspired by Laya's protected question/options head, but
+            # Dazo keeps evidence and options as separate sets instead of packing
+            # options into [MASK] marker positions.
+            queries.append(f"Instruction: {instruction}\nQuery: {query}")
+            evidences.append(f"Evidence:\n{state}")
+
             opts = self._normalize_options(row["options"])
             if len(opts) < 2:
                 raise ValueError("Dazo requires at least two options")
@@ -78,10 +94,17 @@ class DazoCollator:
             is_ood.append(bool(row.get("is_ood", False)))
 
         ctx = self.tokenizer(
-            contexts,
+            evidences,
             padding=True,
             truncation=True,
             max_length=self.context_max_length,
+            return_tensors="pt",
+        )
+        qry = self.tokenizer(
+            queries,
+            padding=True,
+            truncation=True,
+            max_length=self.query_max_length,
             return_tensors="pt",
         )
 
@@ -111,6 +134,8 @@ class DazoCollator:
         return {
             "input_ids": ctx["input_ids"],
             "attention_mask": ctx["attention_mask"],
+            "query_input_ids": qry["input_ids"],
+            "query_attention_mask": qry["attention_mask"],
             "option_input_ids": option_input_ids,
             "option_attention_mask": option_attention_mask,
             "option_mask": option_mask,
