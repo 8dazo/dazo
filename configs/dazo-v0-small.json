@@ -23,5 +23,8 @@
   "backbone_lr": 0.00002,
   "base_compatibility": true,
   "query_conditioning": true,
+  "joint_decision_head": true,
+  "decision_head_layers": 2,
+  "decision_dim": 384,
   "recurrent_logit_scale": 0.1
 }
