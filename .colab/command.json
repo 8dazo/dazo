@@ -1,13 +1,11 @@
 {
-  "id": 32,
-  "task": "train_pilot",
+  "id": 33,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-querycond",
-    "epochs": 10,
-    "batch_size": 2,
-    "grad_accum": 4,
-    "lr": 0.001,
-    "depth_budgets": "1"
+    "checkpoint": "/content/dazo/outputs/dazo-micro-querycond/final",
+    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
+    "loops": "1,8",
+    "batch_size": 2
   },
-  "note": "A/B micro test: protected query stream + query-conditioned options + 2048-token evidence, frozen mmBERT, one recurrent loop."
+  "note": "Evaluate the Laya-inspired query-conditioned checkpoint on the exact 64 training examples immediately after training completes."
 }
