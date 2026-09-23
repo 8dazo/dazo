@@ -14,6 +14,7 @@ class DazoConfig(PretrainedConfig):
         backbone_name: str = "jhu-clsp/mmBERT-small",
         backbone_config: Optional[dict[str, Any]] = None,
         context_max_length: int = 1024,
+        query_max_length: int = 128,
         option_max_length: int = 32,
         latent_dim: int = 384,
         n_evidence_slots: int = 16,
@@ -34,6 +35,7 @@ class DazoConfig(PretrainedConfig):
         unfreeze_last_n_layers: int = 0,
         backbone_lr: float = 2e-5,
         base_compatibility: bool = False,
+        query_conditioning: bool = False,
         recurrent_logit_scale: float = 0.1,
         **kwargs,
     ):
@@ -41,6 +43,7 @@ class DazoConfig(PretrainedConfig):
         self.backbone_name = backbone_name
         self.backbone_config = backbone_config
         self.context_max_length = context_max_length
+        self.query_max_length = query_max_length
         self.option_max_length = option_max_length
         self.latent_dim = latent_dim
         self.n_evidence_slots = n_evidence_slots
@@ -60,10 +63,10 @@ class DazoConfig(PretrainedConfig):
         self.freeze_backbone = freeze_backbone
         self.unfreeze_last_n_layers = unfreeze_last_n_layers
         self.backbone_lr = backbone_lr
-        # Old checkpoints omit this flag and therefore retain the original
-        # latent-only decoder. New configs can opt into the learnable direct
-        # context-option compatibility base score.
+        # Old checkpoints omit these flags and therefore retain their original
+        # input/scoring behavior. New configs opt into them explicitly.
         self.base_compatibility = base_compatibility
+        self.query_conditioning = query_conditioning
         self.recurrent_logit_scale = recurrent_logit_scale
         self.architectures = ["DazoForDecision"]
         self.auto_map = {
