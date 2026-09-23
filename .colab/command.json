@@ -1,6 +1,13 @@
 {
-  "id": 23,
-  "task": "tests",
-  "args": {},
-  "note": "Run invariants after replacing mean-pooled base compatibility with option-conditioned token cross-attention."
+  "id": 24,
+  "task": "train_pilot",
+  "args": {
+    "output": "/content/dazo/outputs/dazo-micro-tokencompat",
+    "epochs": 10,
+    "batch_size": 8,
+    "grad_accum": 1,
+    "lr": 0.001,
+    "depth_budgets": "1"
+  },
+  "note": "A/B micro-memorization test for option-conditioned token-level context compatibility, fixed to one loop."
 }
