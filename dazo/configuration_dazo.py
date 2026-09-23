@@ -41,6 +41,7 @@ class DazoConfig(PretrainedConfig):
         decision_head_layers: int = 2,
         decision_dim: int = 384,
         joint_candidate_encoding: bool = False,
+        shared_joint_encoding: bool = False,
         recurrent_logit_scale: float = 0.1,
         **kwargs,
     ):
@@ -77,6 +78,7 @@ class DazoConfig(PretrainedConfig):
         self.decision_head_layers = decision_head_layers
         self.decision_dim = decision_dim
         self.joint_candidate_encoding = joint_candidate_encoding
+        self.shared_joint_encoding = shared_joint_encoding
         self.recurrent_logit_scale = recurrent_logit_scale
         self.architectures = ["DazoForDecision"]
         self.auto_map = {
