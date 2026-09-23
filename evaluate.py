@@ -74,8 +74,7 @@ def load_dazo_checkpoint(model_ref: str) -> DazoForDecision:
 def _assert_index_range(name: str, tensor: torch.Tensor, size: int) -> None:
     if tensor.numel() == 0:
         return
-    lo = int(tensor.min().item())
-    hi = int(tensor.max().item())
+    lo, hi = int(tensor.min().item()), int(tensor.max().item())
     if lo < 0 or hi >= size:
         raise RuntimeError(f"{name} index out of range before CUDA: min={lo} max={hi} valid=[0,{size - 1}]")
 
@@ -91,21 +90,18 @@ def _preflight_batch(model: DazoForDecision, batch: dict, batch_index: int) -> N
     if "joint_input_ids" in batch:
         _assert_index_range("joint_input_ids", batch["joint_input_ids"], vocab_size)
         _assert_index_range("marker_positions", batch["marker_positions"], batch["joint_input_ids"].size(-1))
+    if "shared_input_ids" in batch:
+        _assert_index_range("shared_input_ids", batch["shared_input_ids"], vocab_size)
+        _assert_index_range("shared_marker_positions", batch["shared_marker_positions"], batch["shared_input_ids"].size(-1))
     _assert_index_range("task_type", batch["task_type"], task_size)
     _assert_index_range("rank_ids", batch["rank_ids"], rank_size)
     if batch_index == 0:
-        qmax = int(batch["query_input_ids"].max()) if "query_input_ids" in batch else -1
-        joint = (
-            f" joint_len={batch['joint_input_ids'].size(-1)} marker_max={int(batch['marker_positions'].max())}"
-            if "joint_input_ids" in batch else ""
-        )
-        print(
-            "preflight "
-            f"vocab_size={vocab_size} evidence_input_max={int(batch['input_ids'].max())} "
-            f"query_input_max={qmax} option_input_max={int(batch['option_input_ids'].max())} "
-            f"task_range=({int(batch['task_type'].min())},{int(batch['task_type'].max())}) "
-            f"rank_range=({int(batch['rank_ids'].min())},{int(batch['rank_ids'].max())}){joint}"
-        )
+        extra = ""
+        if "shared_input_ids" in batch:
+            extra += f" shared_len={batch['shared_input_ids'].size(-1)} shared_marker_max={int(batch['shared_marker_positions'].max())}"
+        if "joint_input_ids" in batch:
+            extra += f" joint_len={batch['joint_input_ids'].size(-1)} marker_max={int(batch['marker_positions'].max())}"
+        print(f"preflight vocab_size={vocab_size} task_range=({int(batch['task_type'].min())},{int(batch['task_type'].max())}){extra}")
 
 
 def main():
@@ -121,11 +117,12 @@ def main():
     data_ref = resolve_data_path(args.data)
     print(f"model={model_ref}")
     print(f"data={data_ref}")
-
     model = load_dazo_checkpoint(model_ref)
     tokenizer_ref = model.config.backbone_name
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref)
+    total_params = sum(p.numel() for p in model.parameters())
     print(f"tokenizer={tokenizer_ref} class={tokenizer.__class__.__name__} len={len(tokenizer)} model_vocab={model.backbone.get_input_embeddings().num_embeddings}")
+    print(f"model_params={total_params} backbone_params={sum(p.numel() for p in model.backbone.parameters())}")
 
     collator = DazoCollator(
         tokenizer,
@@ -133,6 +130,7 @@ def main():
         option_max_length=model.config.option_max_length,
         query_max_length=getattr(model.config, "query_max_length", 128),
         joint_candidate_encoding=getattr(model.config, "joint_candidate_encoding", False),
+        shared_joint_encoding=getattr(model.config, "shared_joint_encoding", False),
         joint_max_length=getattr(model.config, "joint_max_length", model.config.context_max_length),
     )
     loader = DataLoader(JsonlDecisionDataset(data_ref), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
@@ -147,7 +145,6 @@ def main():
     by_depth = {l: {} for l in loops}
     correctness_rows = []
     started = time.perf_counter()
-
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
             _preflight_batch(model, batch, batch_index)
@@ -181,6 +178,7 @@ def main():
         "model": model_ref,
         "data": data_ref,
         "tokenizer": tokenizer_ref,
+        "model_params": total_params,
         "loop_budgets": loops,
         "examples_per_second": sum(x["total"] for x in stats.values()) / max(len(loops), 1) / max(elapsed, 1e-9),
         "loops": {},
