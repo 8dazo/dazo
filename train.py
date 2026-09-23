@@ -23,8 +23,6 @@ def move(batch, device):
 def parse_budgets(spec: str, max_steps: int) -> list[int]:
     vals = sorted({int(x.strip()) for x in spec.split(",") if x.strip()})
     vals = [x for x in vals if 1 <= x <= max_steps]
-    if max_steps not in vals:
-        vals.append(max_steps)
     if not vals:
         vals = [max_steps]
     return sorted(set(vals))
@@ -35,6 +33,8 @@ def evaluate(model, loader, device, max_steps):
     model.eval()
     total = correct = 0
     loss_sum = 0.0
+    pred_counts = None
+    label_counts = None
     for batch in loader:
         batch = move(batch, device)
         outputs = model(
@@ -48,15 +48,23 @@ def evaluate(model, loader, device, max_steps):
         total += batch["labels"].numel()
         correct += pred.eq(batch["labels"]).sum().item()
         loss_sum += float(loss) * batch["labels"].numel()
-    return {"loss": loss_sum / max(total, 1), "accuracy": correct / max(total, 1)}
+        k = outputs["logits"].size(-1)
+        pc = torch.bincount(pred.detach().cpu(), minlength=k)
+        lc = torch.bincount(batch["labels"].detach().cpu(), minlength=k)
+        pred_counts = pc if pred_counts is None else pred_counts + pc
+        label_counts = lc if label_counts is None else label_counts + lc
+    return {
+        "loss": loss_sum / max(total, 1),
+        "accuracy": correct / max(total, 1),
+        "pred_counts": pred_counts.tolist() if pred_counts is not None else [],
+        "label_counts": label_counts.tolist() if label_counts is not None else [],
+    }
 
 
 def choose_amp(device: torch.device) -> tuple[bool, torch.dtype, bool]:
     if device.type != "cuda":
         return False, torch.float32, False
     major, _minor = torch.cuda.get_device_capability()
-    # BF16 is a native Tensor Core path on Ampere (SM80+) and newer. T4 is
-    # Turing (SM75), so prefer FP16 even if a software stack reports BF16 support.
     use_bf16 = major >= 8 and torch.cuda.is_bf16_supported()
     dtype = torch.bfloat16 if use_bf16 else torch.float16
     return True, dtype, dtype == torch.float16
@@ -80,6 +88,13 @@ def main():
         help="Comma-separated recurrent budgets sampled per training batch.",
     )
     p.add_argument("--unfreeze-backbone", action="store_true")
+    p.add_argument("--eval-train", action="store_true", help="Report train-set metrics after every epoch.")
+    p.add_argument(
+        "--save-every",
+        type=int,
+        default=1,
+        help="Save epoch checkpoints every N epochs; 0 disables epoch checkpoints (final is always saved).",
+    )
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
@@ -87,16 +102,21 @@ def main():
     rng = random.Random(args.seed)
     cfg = DazoConfig(**json.loads(Path(args.config).read_text()))
     if args.max_steps is not None:
+        if args.max_steps < 1 or args.max_steps > cfg.max_loop_embeddings:
+            raise ValueError(f"--max-steps must be in 1..{cfg.max_loop_embeddings}")
         cfg.max_steps = args.max_steps
     if args.unfreeze_backbone:
         cfg.freeze_backbone = False
     depth_budgets = parse_budgets(args.depth_budgets, cfg.max_steps)
-    print(f"training recurrent budgets: {depth_budgets}")
+    print(f"training recurrent budgets: {depth_budgets}; max_steps={cfg.max_steps}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.backbone_name)
     collator = DazoCollator(tokenizer, cfg.context_max_length, cfg.option_max_length)
     train_ds = JsonlDecisionDataset(args.train)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
+    train_eval_loader = None
+    if args.eval_train:
+        train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
     eval_loader = None
     if args.eval:
         eval_ds = JsonlDecisionDataset(args.eval)
@@ -109,9 +129,6 @@ def main():
         f"amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}"
     )
 
-    # Fresh training intentionally starts from the named pretrained encoder.
-    # Checkpoint reloads use DazoForDecision.from_pretrained(), which reconstructs
-    # the encoder from config and lets the outer Dazo state dict restore all weights.
     model = DazoForDecision.from_backbone_pretrained(cfg).to(device)
     if args.unfreeze_backbone:
         model.unfreeze_backbone()
@@ -161,14 +178,18 @@ def main():
                 rolling = {}
                 rolling_batches = 0
 
+        if train_eval_loader is not None:
+            metrics = evaluate(model, train_eval_loader, device, cfg.max_steps)
+            print(f"train_eval epoch={epoch} max_budget={cfg.max_steps}: {metrics}")
         if eval_loader is not None:
             metrics = evaluate(model, eval_loader, device, cfg.max_steps)
             print(f"eval epoch={epoch} max_budget={cfg.max_steps}: {metrics}")
 
-        ckpt = Path(args.output) / f"epoch-{epoch}"
-        ckpt.mkdir(parents=True, exist_ok=True)
-        model.save_pretrained(ckpt)
-        tokenizer.save_pretrained(ckpt)
+        if args.save_every > 0 and epoch % args.save_every == 0:
+            ckpt = Path(args.output) / f"epoch-{epoch}"
+            ckpt.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(ckpt)
+            tokenizer.save_pretrained(ckpt)
 
     final = Path(args.output) / "final"
     final.mkdir(parents=True, exist_ok=True)
