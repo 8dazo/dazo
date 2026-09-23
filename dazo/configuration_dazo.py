@@ -31,6 +31,8 @@ class DazoConfig(PretrainedConfig):
         convergence_threshold: float = 0.02,
         correctness_threshold: float = 0.70,
         freeze_backbone: bool = True,
+        unfreeze_last_n_layers: int = 0,
+        backbone_lr: float = 2e-5,
         base_compatibility: bool = False,
         recurrent_logit_scale: float = 0.1,
         **kwargs,
@@ -56,6 +58,8 @@ class DazoConfig(PretrainedConfig):
         self.convergence_threshold = convergence_threshold
         self.correctness_threshold = correctness_threshold
         self.freeze_backbone = freeze_backbone
+        self.unfreeze_last_n_layers = unfreeze_last_n_layers
+        self.backbone_lr = backbone_lr
         # Old checkpoints omit this flag and therefore retain the original
         # latent-only decoder. New configs can opt into the learnable direct
         # context-option compatibility base score.
