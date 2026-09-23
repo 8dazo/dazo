@@ -1,13 +1,11 @@
 {
-  "id": 18,
-  "task": "train_pilot",
+  "id": 19,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-fixed1",
-    "epochs": 20,
-    "batch_size": 8,
-    "grad_accum": 1,
-    "lr": 0.001,
-    "depth_budgets": "1"
+    "checkpoint": "/content/dazo/outputs/dazo-micro-fixed1/final",
+    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
+    "loops": "1,8",
+    "batch_size": 8
   },
-  "note": "Fixed-one-loop 64-example memorization test. Evaluate on the same train set immediately after completion."
+  "note": "Evaluate fixed-one-loop micro checkpoint on the same 64 examples it trained on."
 }
