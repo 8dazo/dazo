@@ -1,6 +1,10 @@
 {
-  "id": 30,
-  "task": "tests",
-  "args": {},
-  "note": "Validate Laya-inspired protected-query Dazo architecture before rebuilding ProofWriter data."
+  "id": 31,
+  "task": "prepare_pilot",
+  "args": {
+    "train_max_depth": 3,
+    "limit_train": 64,
+    "limit_eval": 64
+  },
+  "note": "Rebuild ProofWriter micro benchmark with explicit query/theory separation for the Laya-inspired Dazo path."
 }
