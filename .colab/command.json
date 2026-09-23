@@ -1,6 +1,13 @@
 {
-  "id": 20,
-  "task": "tests",
-  "args": {},
-  "note": "Run Dazo invariants after adding versioned direct context-option compatibility scoring."
+  "id": 21,
+  "task": "train_pilot",
+  "args": {
+    "output": "/content/dazo/outputs/dazo-micro-basecompat",
+    "epochs": 10,
+    "batch_size": 8,
+    "grad_accum": 1,
+    "lr": 0.001,
+    "depth_budgets": "1"
+  },
+  "note": "A/B micro-memorization test for the new direct context-option compatibility base scorer, fixed to one loop."
 }
