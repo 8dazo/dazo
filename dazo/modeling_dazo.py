@@ -1,8 +1,8 @@
 """Dazo Hugging Face wrapper.
 
 The same encoder is reused for context and option semantics. Dazo v0.1 can add a direct
-context-option compatibility score as a learnable base decision, while the recurrent latent
-core acts as a residual refinement. This keeps option scoring permutation-equivariant.
+option-conditioned context compatibility score as a learnable base decision, while the recurrent
+latent core acts as a residual refinement. The direct path is permutation-equivariant over options.
 """
 from __future__ import annotations
 
@@ -48,8 +48,19 @@ class DazoForDecision(PreTrainedModel):
         # Backward-compatible architecture flag: old checkpoints omit this and
         # therefore retain the original latent-only scoring path.
         if config.base_compatibility:
+            heads = min(config.num_attention_heads, hidden)
+            while heads > 1 and hidden % heads != 0:
+                heads -= 1
             self.base_context_norm = nn.LayerNorm(hidden)
             self.base_option_norm = nn.LayerNorm(hidden)
+            # Each option queries the complete token-level context directly. This
+            # avoids washing a long ProofWriter theory/query into one mean vector.
+            self.base_cross_attn = nn.MultiheadAttention(
+                hidden,
+                heads,
+                dropout=config.dropout,
+                batch_first=True,
+            )
             self.base_pair_score = nn.Sequential(
                 nn.LayerNorm(hidden * 4),
                 nn.Linear(hidden * 4, hidden),
@@ -117,15 +128,20 @@ class DazoForDecision(PreTrainedModel):
         option_hidden: torch.Tensor,
         option_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Direct permutation-equivariant context↔option compatibility score.
-
-        This path intentionally avoids the latent bottleneck. It gives Dazo a simple
-        learnable base classifier; recurrent reasoning is added as a residual score.
-        """
-        context = self.base_context_norm(self._mean_pool(context_hidden, attention_mask))
+        """Direct option-conditioned compatibility score over token-level evidence."""
         options = self.base_option_norm(option_hidden)
-        q = context[:, None, :].expand_as(options)
-        pair = torch.cat([options, q, options * q, (options - q).abs()], dim=-1)
+        context = self.base_context_norm(context_hidden)
+        attended, _ = self.base_cross_attn(
+            options,
+            context,
+            context,
+            key_padding_mask=~attention_mask.bool(),
+            need_weights=False,
+        )
+        pair = torch.cat(
+            [options, attended, options * attended, (options - attended).abs()],
+            dim=-1,
+        )
         logits = self.base_pair_score(pair).squeeze(-1)
         return logits.masked_fill(~option_mask.bool(), -1e4)
 
