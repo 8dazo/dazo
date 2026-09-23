@@ -6,6 +6,7 @@ latent core acts as a residual refinement. The direct path is permutation-equiva
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 import torch
@@ -53,8 +54,6 @@ class DazoForDecision(PreTrainedModel):
                 heads -= 1
             self.base_context_norm = nn.LayerNorm(hidden)
             self.base_option_norm = nn.LayerNorm(hidden)
-            # Each option queries the complete token-level context directly. This
-            # avoids washing a long ProofWriter theory/query into one mean vector.
             self.base_cross_attn = nn.MultiheadAttention(
                 hidden,
                 heads,
@@ -92,6 +91,8 @@ class DazoForDecision(PreTrainedModel):
         model.backbone = AutoModel.from_pretrained(config.backbone_name, config=backbone_cfg)
         if config.freeze_backbone:
             model.freeze_backbone()
+            if getattr(config, "unfreeze_last_n_layers", 0) > 0:
+                model.unfreeze_last_backbone_layers(config.unfreeze_last_n_layers)
         return model
 
     def freeze_backbone(self):
@@ -102,6 +103,33 @@ class DazoForDecision(PreTrainedModel):
     def unfreeze_backbone(self):
         for p in self.backbone.parameters():
             p.requires_grad = True
+        return self
+
+    def unfreeze_last_backbone_layers(self, n: int):
+        """Unfreeze the top N transformer layers while leaving embeddings/lower layers frozen.
+
+        ModernBERT parameter names contain ``layers.<index>.``. The implementation is
+        deliberately name-based so it also works for compatible encoder wrappers exposing
+        the same common layer naming convention.
+        """
+        n = int(n)
+        if n <= 0:
+            return self
+        layer_ids = set()
+        for name, _p in self.backbone.named_parameters():
+            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name)
+            if m:
+                layer_ids.add(int(m.group(1)))
+        if not layer_ids:
+            raise RuntimeError("Could not identify transformer layers in backbone parameter names")
+        selected = set(sorted(layer_ids)[-n:])
+        count = 0
+        for name, p in self.backbone.named_parameters():
+            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name)
+            if m and int(m.group(1)) in selected:
+                p.requires_grad = True
+                count += p.numel()
+        print(f"unfrozen_backbone_layers={sorted(selected)} trainable_backbone_params={count}")
         return self
 
     @staticmethod
