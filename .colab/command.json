@@ -1,13 +1,11 @@
 {
-  "id": 35,
-  "task": "train_pilot",
+  "id": 36,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-jointhead",
-    "epochs": 10,
-    "batch_size": 2,
-    "grad_accum": 4,
-    "lr": 0.001,
-    "depth_budgets": "1"
+    "checkpoint": "/content/dazo/outputs/dazo-micro-jointhead/final",
+    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
+    "loops": "1,8",
+    "batch_size": 2
   },
-  "note": "A/B micro test: protected query + joint option decision tokens + 2048 evidence, frozen mmBERT, one loop."
+  "note": "Evaluate Laya-inspired joint decision-token checkpoint on the exact 64 training examples immediately after training."
 }
