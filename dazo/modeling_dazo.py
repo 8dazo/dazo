@@ -1,10 +1,10 @@
 """Dazo Hugging Face wrapper.
 
-Dazo keeps evidence, query, and candidate options as distinct streams. Newer checkpoints can
-query-condition every candidate before evidence matching. A lightweight joint decision-token
-head, inspired by Laya's contextual marker scoring, lets candidates interact before scoring while
-remaining permutation-equivariant over the option set. The recurrent latent core acts as a
-residual refinement.
+Dazo supports several backward-compatible decision paths. The newest path takes inspiration from
+Laya's contextual [MASK] decision markers but removes the shared option token budget: every
+candidate gets its own joint sequence containing query, marker, candidate, and evidence. This
+keeps option permutation equivariance while letting the frozen bidirectional encoder contextualize
+the candidate against the actual problem before Dazo's recurrent latent refinement.
 """
 from __future__ import annotations
 
@@ -60,6 +60,14 @@ class DazoForDecision(PreTrainedModel):
             )
             self.query_fuse_norm = nn.LayerNorm(hidden)
 
+        if config.joint_candidate_encoding:
+            self.marker_scorer = nn.Sequential(
+                nn.LayerNorm(hidden),
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 1),
+            )
+
         if config.base_compatibility:
             heads = self._valid_heads(hidden, config.num_attention_heads)
             self.base_context_norm = nn.LayerNorm(hidden)
@@ -94,8 +102,7 @@ class DazoForDecision(PreTrainedModel):
                     enable_nested_tensor=False,
                 )
                 self.decision_score = nn.Sequential(
-                    nn.LayerNorm(decision_dim),
-                    nn.Linear(decision_dim, 1),
+                    nn.LayerNorm(decision_dim), nn.Linear(decision_dim, 1)
                 )
             else:
                 self.base_pair_score = nn.Sequential(
@@ -182,6 +189,22 @@ class DazoForDecision(PreTrainedModel):
         pooled = self._mean_pool(out, flat_mask)
         return pooled.reshape(bsz, nopt, -1)
 
+    def _encode_joint_candidates(
+        self,
+        joint_input_ids: torch.Tensor,
+        joint_attention_mask: torch.Tensor,
+        marker_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return contextualized [MASK] marker state for each candidate sequence."""
+        bsz, nopt, length = joint_input_ids.shape
+        flat_ids = joint_input_ids.reshape(bsz * nopt, length)
+        flat_mask = joint_attention_mask.reshape(bsz * nopt, length)
+        hidden = self.backbone(input_ids=flat_ids, attention_mask=flat_mask).last_hidden_state
+        pos = marker_positions.reshape(-1).long().clamp(0, length - 1)
+        row = torch.arange(hidden.size(0), device=hidden.device)
+        marker = hidden[row, pos]
+        return marker.reshape(bsz, nopt, -1)
+
     def _condition_options_on_query(
         self,
         option_hidden: torch.Tensor,
@@ -244,12 +267,7 @@ class DazoForDecision(PreTrainedModel):
         pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
         if self.config.joint_decision_head:
             return self._joint_decision_logits(
-                pair,
-                option_mask,
-                query_hidden,
-                query_attention_mask,
-                context_hidden,
-                attention_mask,
+                pair, option_mask, query_hidden, query_attention_mask, context_hidden, attention_mask
             )
         logits = self.base_pair_score(pair).squeeze(-1)
         return logits.masked_fill(~option_mask.bool(), -1e4)
@@ -280,6 +298,9 @@ class DazoForDecision(PreTrainedModel):
         option_mask: torch.Tensor,
         query_input_ids: Optional[torch.Tensor] = None,
         query_attention_mask: Optional[torch.Tensor] = None,
+        joint_input_ids: Optional[torch.Tensor] = None,
+        joint_attention_mask: Optional[torch.Tensor] = None,
+        marker_positions: Optional[torch.Tensor] = None,
         task_type: Optional[torch.Tensor] = None,
         rank_ids: Optional[torch.Tensor] = None,
         max_steps: Optional[int] = None,
@@ -291,18 +312,33 @@ class DazoForDecision(PreTrainedModel):
         **unused,
     ):
         context = self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
-        options = self._encode_options(option_input_ids, option_attention_mask)
+        marker_logits = None
+        if self.config.joint_candidate_encoding:
+            if joint_input_ids is None or joint_attention_mask is None or marker_positions is None:
+                raise ValueError(
+                    "joint_candidate_encoding=True requires joint_input_ids, joint_attention_mask, and marker_positions"
+                )
+            options = self._encode_joint_candidates(
+                joint_input_ids, joint_attention_mask, marker_positions
+            )
+            marker_logits = self.marker_scorer(options).squeeze(-1)
+            marker_logits = marker_logits.masked_fill(~option_mask.bool(), -1e4)
+        else:
+            options = self._encode_options(option_input_ids, option_attention_mask)
+
         reasoning_context = context
         reasoning_mask = attention_mask.bool()
         query_hidden = None
-
         if self.config.query_conditioning:
             if query_input_ids is None or query_attention_mask is None:
                 raise ValueError("query_conditioning=True requires query_input_ids and query_attention_mask")
             query_hidden = self.backbone(
                 input_ids=query_input_ids, attention_mask=query_attention_mask
             ).last_hidden_state
-            options = self._condition_options_on_query(options, query_hidden, query_attention_mask)
+            # Joint candidate markers already saw the full query inside mmBERT;
+            # applying the post-encoder query fusion again would confound this A/B.
+            if not self.config.joint_candidate_encoding:
+                options = self._condition_options_on_query(options, query_hidden, query_attention_mask)
             reasoning_context = torch.cat([query_hidden, context], dim=1)
             reasoning_mask = torch.cat([query_attention_mask.bool(), attention_mask.bool()], dim=1)
 
@@ -321,7 +357,9 @@ class DazoForDecision(PreTrainedModel):
             correctness_threshold=(correctness_threshold if correctness_threshold is not None else self.config.correctness_threshold),
         )
 
-        if self.config.base_compatibility:
+        if marker_logits is not None:
+            out = self._apply_base_compatibility(out, marker_logits, option_mask)
+        elif self.config.base_compatibility:
             base_logits = self._base_compatibility_logits(
                 context,
                 attention_mask,
