@@ -36,6 +36,9 @@ class DazoConfig(PretrainedConfig):
         backbone_lr: float = 2e-5,
         base_compatibility: bool = False,
         query_conditioning: bool = False,
+        joint_decision_head: bool = False,
+        decision_head_layers: int = 2,
+        decision_dim: int = 384,
         recurrent_logit_scale: float = 0.1,
         **kwargs,
     ):
@@ -67,6 +70,9 @@ class DazoConfig(PretrainedConfig):
         # input/scoring behavior. New configs opt into them explicitly.
         self.base_compatibility = base_compatibility
         self.query_conditioning = query_conditioning
+        self.joint_decision_head = joint_decision_head
+        self.decision_head_layers = decision_head_layers
+        self.decision_dim = decision_dim
         self.recurrent_logit_scale = recurrent_logit_scale
         self.architectures = ["DazoForDecision"]
         self.auto_map = {
