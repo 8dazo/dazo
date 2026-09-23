@@ -31,6 +31,8 @@ def model_forward(model, batch, max_steps):
         input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
         query_input_ids=batch.get("query_input_ids"), query_attention_mask=batch.get("query_attention_mask"),
         option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
+        joint_input_ids=batch.get("joint_input_ids"), joint_attention_mask=batch.get("joint_attention_mask"),
+        marker_positions=batch.get("marker_positions"),
         option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
         max_steps=max_steps,
     )
@@ -110,6 +112,8 @@ def main():
         context_max_length=cfg.context_max_length,
         option_max_length=cfg.option_max_length,
         query_max_length=cfg.query_max_length,
+        joint_candidate_encoding=cfg.joint_candidate_encoding,
+        joint_max_length=cfg.joint_max_length,
     )
     train_ds = JsonlDecisionDataset(args.train)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
