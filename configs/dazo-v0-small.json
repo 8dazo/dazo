@@ -1,6 +1,7 @@
 {
   "backbone_name": "jhu-clsp/mmBERT-small",
   "context_max_length": 2048,
+  "query_max_length": 128,
   "option_max_length": 32,
   "latent_dim": 384,
   "n_evidence_slots": 16,
@@ -18,8 +19,9 @@
   "convergence_threshold": 0.02,
   "correctness_threshold": 0.70,
   "freeze_backbone": true,
-  "unfreeze_last_n_layers": 2,
+  "unfreeze_last_n_layers": 0,
   "backbone_lr": 0.00002,
   "base_compatibility": true,
+  "query_conditioning": true,
   "recurrent_logit_scale": 0.1
 }
