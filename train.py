@@ -82,19 +82,10 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.01)
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--max-steps", type=int, default=None)
-    p.add_argument(
-        "--depth-budgets",
-        default="1,2,3,4,6,8",
-        help="Comma-separated recurrent budgets sampled per training batch.",
-    )
+    p.add_argument("--depth-budgets", default="1,2,3,4,6,8")
     p.add_argument("--unfreeze-backbone", action="store_true")
-    p.add_argument("--eval-train", action="store_true", help="Report train-set metrics after every epoch.")
-    p.add_argument(
-        "--save-every",
-        type=int,
-        default=1,
-        help="Save epoch checkpoints every N epochs; 0 disables epoch checkpoints (final is always saved).",
-    )
+    p.add_argument("--eval-train", action="store_true")
+    p.add_argument("--save-every", type=int, default=1)
     p.add_argument("--seed", type=int, default=42)
     args = p.parse_args()
 
@@ -107,6 +98,7 @@ def main():
         cfg.max_steps = args.max_steps
     if args.unfreeze_backbone:
         cfg.freeze_backbone = False
+        cfg.unfreeze_last_n_layers = 0
     depth_budgets = parse_budgets(args.depth_budgets, cfg.max_steps)
     print(f"training recurrent budgets: {depth_budgets}; max_steps={cfg.max_steps}")
 
@@ -114,33 +106,42 @@ def main():
     collator = DazoCollator(tokenizer, cfg.context_max_length, cfg.option_max_length)
     train_ds = JsonlDecisionDataset(args.train)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
-    train_eval_loader = None
-    if args.eval_train:
-        train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
+    train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator) if args.eval_train else None
     eval_loader = None
     if args.eval:
-        eval_ds = JsonlDecisionDataset(args.eval)
-        eval_loader = DataLoader(eval_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator)
+        eval_loader = DataLoader(JsonlDecisionDataset(args.eval), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled, amp_dtype, scaler_enabled = choose_amp(device)
-    print(
-        f"device={device} amp={amp_enabled} "
-        f"amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}"
-    )
+    print(f"device={device} amp={amp_enabled} amp_dtype={amp_dtype if amp_enabled else 'disabled'} grad_scaler={scaler_enabled}")
 
     model = DazoForDecision.from_backbone_pretrained(cfg).to(device)
     if args.unfreeze_backbone:
         model.unfreeze_backbone()
 
-    params = [x for x in model.parameters() if x.requires_grad]
-    optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
+    backbone_ids = {id(p) for p in backbone_params}
+    head_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_ids]
+    groups = []
+    if head_params:
+        groups.append({"params": head_params, "lr": args.lr})
+    if backbone_params:
+        groups.append({"params": backbone_params, "lr": float(cfg.backbone_lr)})
+    optimizer = torch.optim.AdamW(groups, weight_decay=args.weight_decay)
+    params = head_params + backbone_params
+    print(
+        f"trainable_head_params={sum(p.numel() for p in head_params)} "
+        f"trainable_backbone_params={sum(p.numel() for p in backbone_params)} "
+        f"head_lr={args.lr} backbone_lr={cfg.backbone_lr if backbone_params else 0}"
+    )
     scaler = torch.amp.GradScaler("cuda", enabled=scaler_enabled)
 
     Path(args.output).mkdir(parents=True, exist_ok=True)
     for epoch in range(1, args.epochs + 1):
         model.train()
-        if cfg.freeze_backbone:
+        # If the backbone is entirely frozen, keep it in eval mode. Partially
+        # trainable top layers remain in train mode so task adaptation is real.
+        if not backbone_params:
             model.backbone.eval()
         optimizer.zero_grad(set_to_none=True)
         rolling = {}
@@ -171,19 +172,14 @@ def main():
             rolling_batches += 1
             if step % 50 == 0:
                 denom = float(max(rolling_batches, 1))
-                print(
-                    f"epoch={epoch} step={step}/{len(train_loader)} "
-                    + " ".join(f"{k}={v/denom:.4f}" for k, v in rolling.items())
-                )
+                print(f"epoch={epoch} step={step}/{len(train_loader)} " + " ".join(f"{k}={v/denom:.4f}" for k, v in rolling.items()))
                 rolling = {}
                 rolling_batches = 0
 
         if train_eval_loader is not None:
-            metrics = evaluate(model, train_eval_loader, device, cfg.max_steps)
-            print(f"train_eval epoch={epoch} max_budget={cfg.max_steps}: {metrics}")
+            print(f"train_eval epoch={epoch} max_budget={cfg.max_steps}: {evaluate(model, train_eval_loader, device, cfg.max_steps)}")
         if eval_loader is not None:
-            metrics = evaluate(model, eval_loader, device, cfg.max_steps)
-            print(f"eval epoch={epoch} max_budget={cfg.max_steps}: {metrics}")
+            print(f"eval epoch={epoch} max_budget={cfg.max_steps}: {evaluate(model, eval_loader, device, cfg.max_steps)}")
 
         if args.save_every > 0 and epoch % args.save_every == 0:
             ckpt = Path(args.output) / f"epoch-{epoch}"
