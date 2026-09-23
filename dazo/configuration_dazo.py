@@ -16,6 +16,7 @@ class DazoConfig(PretrainedConfig):
         context_max_length: int = 1024,
         query_max_length: int = 128,
         option_max_length: int = 32,
+        joint_max_length: int = 2048,
         latent_dim: int = 384,
         n_evidence_slots: int = 16,
         n_hypothesis_slots: int = 8,
@@ -39,6 +40,7 @@ class DazoConfig(PretrainedConfig):
         joint_decision_head: bool = False,
         decision_head_layers: int = 2,
         decision_dim: int = 384,
+        joint_candidate_encoding: bool = False,
         recurrent_logit_scale: float = 0.1,
         **kwargs,
     ):
@@ -48,6 +50,7 @@ class DazoConfig(PretrainedConfig):
         self.context_max_length = context_max_length
         self.query_max_length = query_max_length
         self.option_max_length = option_max_length
+        self.joint_max_length = joint_max_length
         self.latent_dim = latent_dim
         self.n_evidence_slots = n_evidence_slots
         self.n_hypothesis_slots = n_hypothesis_slots
@@ -73,6 +76,7 @@ class DazoConfig(PretrainedConfig):
         self.joint_decision_head = joint_decision_head
         self.decision_head_layers = decision_head_layers
         self.decision_dim = decision_dim
+        self.joint_candidate_encoding = joint_candidate_encoding
         self.recurrent_logit_scale = recurrent_logit_scale
         self.architectures = ["DazoForDecision"]
         self.auto_map = {
