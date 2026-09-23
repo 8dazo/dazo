@@ -1,11 +1,13 @@
 {
-  "id": 27,
-  "task": "gate1_eval",
+  "id": 28,
+  "task": "train_pilot",
   "args": {
-    "checkpoint": "/content/dazo/outputs/dazo-micro-tokencompat-2048/final",
-    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
-    "loops": "1,8",
-    "batch_size": 4
+    "output": "/content/dazo/outputs/dazo-micro-top2",
+    "epochs": 10,
+    "batch_size": 1,
+    "grad_accum": 8,
+    "lr": 0.0005,
+    "depth_budgets": "1"
   },
-  "note": "Measure whether 2048-token context improves memorization on the same 64 training examples."
+  "note": "Representation-adaptation test: 2048-token context, option-conditioned base scorer, and only the top 2 mmBERT layers trainable at backbone_lr=2e-5."
 }
