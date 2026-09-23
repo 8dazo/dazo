@@ -1,13 +1,11 @@
 {
-  "id": 24,
-  "task": "train_pilot",
+  "id": 25,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-tokencompat",
-    "epochs": 10,
-    "batch_size": 8,
-    "grad_accum": 1,
-    "lr": 0.001,
-    "depth_budgets": "1"
+    "checkpoint": "/content/dazo/outputs/dazo-micro-tokencompat/final",
+    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
+    "loops": "1,8",
+    "batch_size": 8
   },
-  "note": "A/B micro-memorization test for option-conditioned token-level context compatibility, fixed to one loop."
+  "note": "Evaluate token-level compatibility micro checkpoint on the same 64 training examples."
 }
