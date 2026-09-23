@@ -1,6 +1,6 @@
 {
   "backbone_name": "jhu-clsp/mmBERT-small",
-  "context_max_length": 1024,
+  "context_max_length": 2048,
   "option_max_length": 32,
   "latent_dim": 384,
   "n_evidence_slots": 16,
