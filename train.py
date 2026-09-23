@@ -33,6 +33,8 @@ def model_forward(model, batch, max_steps):
         option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
         joint_input_ids=batch.get("joint_input_ids"), joint_attention_mask=batch.get("joint_attention_mask"),
         marker_positions=batch.get("marker_positions"),
+        shared_input_ids=batch.get("shared_input_ids"), shared_attention_mask=batch.get("shared_attention_mask"),
+        shared_marker_positions=batch.get("shared_marker_positions"),
         option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
         max_steps=max_steps,
     )
@@ -113,6 +115,7 @@ def main():
         option_max_length=cfg.option_max_length,
         query_max_length=cfg.query_max_length,
         joint_candidate_encoding=cfg.joint_candidate_encoding,
+        shared_joint_encoding=getattr(cfg, "shared_joint_encoding", False),
         joint_max_length=cfg.joint_max_length,
     )
     train_ds = JsonlDecisionDataset(args.train)
@@ -127,6 +130,10 @@ def main():
     model = DazoForDecision.from_backbone_pretrained(cfg).to(device)
     if args.unfreeze_backbone:
         model.unfreeze_backbone()
+
+    total_params = sum(p.numel() for p in model.parameters())
+    backbone_total = sum(p.numel() for p in model.backbone.parameters())
+    print(f"model_params={total_params} backbone_params={backbone_total} head_params={total_params-backbone_total}")
 
     backbone_params = [p for p in model.backbone.parameters() if p.requires_grad]
     backbone_ids = {id(p) for p in backbone_params}
