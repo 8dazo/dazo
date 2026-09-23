@@ -1,33 +1,31 @@
 """Dazo Hugging Face wrapper.
 
-The same encoder is reused for context and option semantics. Options are short and flattened into
-one batch; this is intentionally simple for v0. Production versions can cache option embeddings or
-replace the option path with a smaller semantic encoder without changing DazoCore.
+The same encoder is reused for context and option semantics. Dazo v0.1 can add a direct
+context-option compatibility score as a learnable base decision, while the recurrent latent
+core acts as a residual refinement. This keeps option scoring permutation-equivariant.
 """
 from __future__ import annotations
 
 from typing import Optional
 
 import torch
+import torch.nn as nn
 from transformers import AutoConfig, AutoModel, PreTrainedModel
 
 from .configuration_dazo import DazoConfig
-from .core import DazoCore
+from .core import DazoCore, masked_softmax
 
 
 class DazoForDecision(PreTrainedModel):
     config_class = DazoConfig
     base_model_prefix = "dazo"
-    # Transformers 5.x consults this mapping while finalizing meta-device loads.
-    # Dazo has no tied output/input weights, so the correct mapping is empty.
     all_tied_weights_keys = {}
 
     def __init__(self, config: DazoConfig):
         super().__init__(config)
 
-        # IMPORTANT: never call AutoModel.from_pretrained() here. Transformers may
-        # instantiate this class under a meta-device context while loading a Dazo
-        # checkpoint. Nested from_pretrained() calls are invalid in that context.
+        # Never call AutoModel.from_pretrained() here. Transformers may instantiate
+        # this class under a meta-device context while loading a Dazo checkpoint.
         backbone_cfg = self._resolve_backbone_config(config)
         self.backbone = AutoModel.from_config(backbone_cfg)
 
@@ -46,6 +44,19 @@ class DazoForDecision(PreTrainedModel):
             max_loop_embeddings=config.max_loop_embeddings,
             max_rank=config.max_rank,
         )
+
+        # Backward-compatible architecture flag: old checkpoints omit this and
+        # therefore retain the original latent-only scoring path.
+        if config.base_compatibility:
+            self.base_context_norm = nn.LayerNorm(hidden)
+            self.base_option_norm = nn.LayerNorm(hidden)
+            self.base_pair_score = nn.Sequential(
+                nn.LayerNorm(hidden * 4),
+                nn.Linear(hidden * 4, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 1),
+            )
+
         if config.freeze_backbone:
             self.freeze_backbone()
 
@@ -57,20 +68,13 @@ class DazoForDecision(PreTrainedModel):
             model_type = saved.pop("model_type")
             return AutoConfig.for_model(model_type, **saved)
 
-        # Backward compatibility for checkpoints produced before backbone_config
-        # was persisted. Config loading is safe in a meta context; weight loading is not.
         backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
         config.backbone_config = backbone_cfg.to_dict()
         return backbone_cfg
 
     @classmethod
     def from_backbone_pretrained(cls, config: DazoConfig) -> "DazoForDecision":
-        """Create a fresh Dazo model initialized from the named pretrained encoder.
-
-        Use this path for *new training*. Saved Dazo checkpoints should use the normal
-        ``DazoForDecision.from_pretrained(path_or_repo)`` API so the outer checkpoint
-        loader restores both the backbone and Dazo reasoning-core weights.
-        """
+        """Create a fresh Dazo model initialized from the named pretrained encoder."""
         backbone_cfg = AutoConfig.from_pretrained(config.backbone_name)
         config.backbone_config = backbone_cfg.to_dict()
         model = cls(config)
@@ -105,6 +109,49 @@ class DazoForDecision(PreTrainedModel):
         out = self.backbone(input_ids=flat_ids, attention_mask=flat_mask).last_hidden_state
         pooled = self._mean_pool(out, flat_mask)
         return pooled.reshape(bsz, nopt, -1)
+
+    def _base_compatibility_logits(
+        self,
+        context_hidden: torch.Tensor,
+        attention_mask: torch.Tensor,
+        option_hidden: torch.Tensor,
+        option_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Direct permutation-equivariant context↔option compatibility score.
+
+        This path intentionally avoids the latent bottleneck. It gives Dazo a simple
+        learnable base classifier; recurrent reasoning is added as a residual score.
+        """
+        context = self.base_context_norm(self._mean_pool(context_hidden, attention_mask))
+        options = self.base_option_norm(option_hidden)
+        q = context[:, None, :].expand_as(options)
+        pair = torch.cat([options, q, options * q, (options - q).abs()], dim=-1)
+        logits = self.base_pair_score(pair).squeeze(-1)
+        return logits.masked_fill(~option_mask.bool(), -1e4)
+
+    def _apply_base_compatibility(
+        self,
+        out,
+        base_logits: torch.Tensor,
+        option_mask: torch.Tensor,
+    ):
+        scale = float(self.config.recurrent_logit_scale)
+        per_step_logits = base_logits[:, None, :] + scale * out.per_step_logits
+        step_mask = option_mask[:, None, :].bool().expand_as(per_step_logits)
+        per_step_probs = masked_softmax(per_step_logits, step_mask)
+
+        selected = out.selected_step.long().clamp_min(1) - 1
+        batch = torch.arange(base_logits.size(0), device=base_logits.device)
+        logits = per_step_logits[batch, selected]
+        probs = per_step_probs[batch, selected]
+        energy = -torch.logsumexp(logits.float().masked_fill(~option_mask.bool(), -1e4), dim=-1)
+
+        out.per_step_logits = per_step_logits
+        out.per_step_probs = per_step_probs
+        out.logits = logits
+        out.probs = probs
+        out.energy = energy
+        return out
 
     def forward(
         self,
@@ -147,4 +194,9 @@ class DazoForDecision(PreTrainedModel):
                 else self.config.correctness_threshold
             ),
         )
+
+        if self.config.base_compatibility:
+            base_logits = self._base_compatibility_logits(context, attention_mask, options, option_mask)
+            out = self._apply_base_compatibility(out, base_logits, option_mask)
+
         return out.to_dict()
