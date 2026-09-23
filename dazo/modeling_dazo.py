@@ -1,10 +1,9 @@
 """Dazo Hugging Face wrapper.
 
-Dazo supports several backward-compatible decision paths. The newest path takes inspiration from
-Laya's contextual [MASK] decision markers but removes the shared option token budget: every
-candidate gets its own joint sequence containing query, marker, candidate, and evidence. This
-keeps option permutation equivariance while letting the frozen bidirectional encoder contextualize
-the candidate against the actual problem before Dazo's recurrent latent refinement.
+Dazo keeps backward-compatible experimental paths, plus a compact shared-marker path used by
+Dazo-15M. The compact path runs the encoder exactly once per question over query + all candidate
+markers + evidence, gathers the contextualized marker states, and lets a tiny recurrent core refine
+them. This preserves typed decisions while avoiding one backbone pass per option.
 """
 from __future__ import annotations
 
@@ -28,7 +27,6 @@ class DazoForDecision(PreTrainedModel):
         super().__init__(config)
         backbone_cfg = self._resolve_backbone_config(config)
         self.backbone = AutoModel.from_config(backbone_cfg)
-
         hidden = int(self.backbone.config.hidden_size)
         self.core = DazoCore(
             context_dim=hidden,
@@ -49,67 +47,36 @@ class DazoForDecision(PreTrainedModel):
             heads = self._valid_heads(hidden, config.num_attention_heads)
             self.query_norm = nn.LayerNorm(hidden)
             self.query_option_norm = nn.LayerNorm(hidden)
-            self.query_cross_attn = nn.MultiheadAttention(
-                hidden, heads, dropout=config.dropout, batch_first=True
-            )
+            self.query_cross_attn = nn.MultiheadAttention(hidden, heads, dropout=config.dropout, batch_first=True)
             self.query_fuse = nn.Sequential(
-                nn.LayerNorm(hidden * 4),
-                nn.Linear(hidden * 4, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, hidden),
+                nn.LayerNorm(hidden * 4), nn.Linear(hidden * 4, hidden), nn.GELU(), nn.Linear(hidden, hidden)
             )
             self.query_fuse_norm = nn.LayerNorm(hidden)
 
-        if config.joint_candidate_encoding:
+        if config.joint_candidate_encoding or getattr(config, "shared_joint_encoding", False):
             self.marker_scorer = nn.Sequential(
-                nn.LayerNorm(hidden),
-                nn.Linear(hidden, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, 1),
+                nn.LayerNorm(hidden), nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 1)
             )
 
         if config.base_compatibility:
             heads = self._valid_heads(hidden, config.num_attention_heads)
             self.base_context_norm = nn.LayerNorm(hidden)
             self.base_option_norm = nn.LayerNorm(hidden)
-            self.base_cross_attn = nn.MultiheadAttention(
-                hidden, heads, dropout=config.dropout, batch_first=True
-            )
+            self.base_cross_attn = nn.MultiheadAttention(hidden, heads, dropout=config.dropout, batch_first=True)
             if config.joint_decision_head:
                 decision_dim = int(config.decision_dim)
                 decision_heads = self._valid_heads(decision_dim, config.num_attention_heads)
-                self.decision_pair_proj = nn.Sequential(
-                    nn.LayerNorm(hidden * 4),
-                    nn.Linear(hidden * 4, decision_dim),
-                    nn.GELU(),
-                )
-                self.decision_global_proj = nn.Sequential(
-                    nn.LayerNorm(hidden),
-                    nn.Linear(hidden, decision_dim),
-                )
+                self.decision_pair_proj = nn.Sequential(nn.LayerNorm(hidden * 4), nn.Linear(hidden * 4, decision_dim), nn.GELU())
+                self.decision_global_proj = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, decision_dim))
                 layer = nn.TransformerEncoderLayer(
-                    d_model=decision_dim,
-                    nhead=decision_heads,
-                    dim_feedforward=decision_dim * 4,
-                    dropout=config.dropout,
-                    activation="gelu",
-                    batch_first=True,
-                    norm_first=True,
+                    d_model=decision_dim, nhead=decision_heads, dim_feedforward=decision_dim * 4,
+                    dropout=config.dropout, activation="gelu", batch_first=True, norm_first=True,
                 )
-                self.decision_head = nn.TransformerEncoder(
-                    layer,
-                    num_layers=max(1, int(config.decision_head_layers)),
-                    enable_nested_tensor=False,
-                )
-                self.decision_score = nn.Sequential(
-                    nn.LayerNorm(decision_dim), nn.Linear(decision_dim, 1)
-                )
+                self.decision_head = nn.TransformerEncoder(layer, num_layers=max(1, int(config.decision_head_layers)), enable_nested_tensor=False)
+                self.decision_score = nn.Sequential(nn.LayerNorm(decision_dim), nn.Linear(decision_dim, 1))
             else:
                 self.base_pair_score = nn.Sequential(
-                    nn.LayerNorm(hidden * 4),
-                    nn.Linear(hidden * 4, hidden),
-                    nn.GELU(),
-                    nn.Linear(hidden, 1),
+                    nn.LayerNorm(hidden * 4), nn.Linear(hidden * 4, hidden), nn.GELU(), nn.Linear(hidden, 1)
                 )
 
         if config.freeze_backbone:
@@ -161,7 +128,7 @@ class DazoForDecision(PreTrainedModel):
             return self
         layer_ids = set()
         for name, _p in self.backbone.named_parameters():
-            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name)
+            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name) or re.search(r"(?:^|\.)layer\.(\d+)\.", name)
             if m:
                 layer_ids.add(int(m.group(1)))
         if not layer_ids:
@@ -169,7 +136,7 @@ class DazoForDecision(PreTrainedModel):
         selected = set(sorted(layer_ids)[-n:])
         count = 0
         for name, p in self.backbone.named_parameters():
-            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name)
+            m = re.search(r"(?:^|\.)layers\.(\d+)\.", name) or re.search(r"(?:^|\.)layer\.(\d+)\.", name)
             if m and int(m.group(1)) in selected:
                 p.requires_grad = True
                 count += p.numel()
@@ -189,104 +156,59 @@ class DazoForDecision(PreTrainedModel):
         pooled = self._mean_pool(out, flat_mask)
         return pooled.reshape(bsz, nopt, -1)
 
-    def _encode_joint_candidates(
-        self,
-        joint_input_ids: torch.Tensor,
-        joint_attention_mask: torch.Tensor,
-        marker_positions: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return contextualized [MASK] marker state for each candidate sequence."""
+    def _encode_joint_candidates(self, joint_input_ids, joint_attention_mask, marker_positions):
         bsz, nopt, length = joint_input_ids.shape
         flat_ids = joint_input_ids.reshape(bsz * nopt, length)
         flat_mask = joint_attention_mask.reshape(bsz * nopt, length)
         hidden = self.backbone(input_ids=flat_ids, attention_mask=flat_mask).last_hidden_state
         pos = marker_positions.reshape(-1).long().clamp(0, length - 1)
         row = torch.arange(hidden.size(0), device=hidden.device)
-        marker = hidden[row, pos]
-        return marker.reshape(bsz, nopt, -1)
+        return hidden[row, pos].reshape(bsz, nopt, -1)
 
-    def _condition_options_on_query(
-        self,
-        option_hidden: torch.Tensor,
-        query_hidden: torch.Tensor,
-        query_attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def _encode_shared(self, shared_input_ids, shared_attention_mask, shared_marker_positions):
+        hidden = self.backbone(input_ids=shared_input_ids, attention_mask=shared_attention_mask).last_hidden_state
+        pos = shared_marker_positions.long().clamp(0, hidden.size(1) - 1)
+        row = torch.arange(hidden.size(0), device=hidden.device)[:, None].expand_as(pos)
+        markers = hidden[row, pos]
+        return hidden, markers
+
+    def _condition_options_on_query(self, option_hidden, query_hidden, query_attention_mask):
         options = self.query_option_norm(option_hidden)
         query = self.query_norm(query_hidden)
-        attended, _ = self.query_cross_attn(
-            options,
-            query,
-            query,
-            key_padding_mask=~query_attention_mask.bool(),
-            need_weights=False,
-        )
+        attended, _ = self.query_cross_attn(options, query, query, key_padding_mask=~query_attention_mask.bool(), need_weights=False)
         pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
-        update = self.query_fuse(pair)
-        return self.query_fuse_norm(option_hidden + update)
+        return self.query_fuse_norm(option_hidden + self.query_fuse(pair))
 
-    def _joint_decision_logits(
-        self,
-        pair: torch.Tensor,
-        option_mask: torch.Tensor,
-        query_hidden: Optional[torch.Tensor],
-        query_attention_mask: Optional[torch.Tensor],
-        context_hidden: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> torch.Tensor:
+    def _joint_decision_logits(self, pair, option_mask, query_hidden, query_attention_mask, context_hidden, attention_mask):
         option_tokens = self.decision_pair_proj(pair)
-        if query_hidden is not None and query_attention_mask is not None:
-            global_hidden = self._mean_pool(query_hidden, query_attention_mask)
-        else:
-            global_hidden = self._mean_pool(context_hidden, attention_mask)
+        global_hidden = self._mean_pool(query_hidden, query_attention_mask) if query_hidden is not None else self._mean_pool(context_hidden, attention_mask)
         global_token = self.decision_global_proj(global_hidden).unsqueeze(1)
         tokens = torch.cat([global_token, option_tokens], dim=1)
-        global_valid = torch.ones(option_mask.size(0), 1, dtype=torch.bool, device=option_mask.device)
-        valid = torch.cat([global_valid, option_mask.bool()], dim=1)
+        valid = torch.cat([torch.ones(option_mask.size(0), 1, dtype=torch.bool, device=option_mask.device), option_mask.bool()], dim=1)
         contextualized = self.decision_head(tokens, src_key_padding_mask=~valid)
-        logits = self.decision_score(contextualized[:, 1:]).squeeze(-1)
-        return logits.masked_fill(~option_mask.bool(), -1e4)
+        return self.decision_score(contextualized[:, 1:]).squeeze(-1).masked_fill(~option_mask.bool(), -1e4)
 
-    def _base_compatibility_logits(
-        self,
-        context_hidden: torch.Tensor,
-        attention_mask: torch.Tensor,
-        option_hidden: torch.Tensor,
-        option_mask: torch.Tensor,
-        query_hidden: Optional[torch.Tensor] = None,
-        query_attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def _base_compatibility_logits(self, context_hidden, attention_mask, option_hidden, option_mask, query_hidden=None, query_attention_mask=None):
         options = self.base_option_norm(option_hidden)
         context = self.base_context_norm(context_hidden)
-        attended, _ = self.base_cross_attn(
-            options,
-            context,
-            context,
-            key_padding_mask=~attention_mask.bool(),
-            need_weights=False,
-        )
+        attended, _ = self.base_cross_attn(options, context, context, key_padding_mask=~attention_mask.bool(), need_weights=False)
         pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
         if self.config.joint_decision_head:
-            return self._joint_decision_logits(
-                pair, option_mask, query_hidden, query_attention_mask, context_hidden, attention_mask
-            )
-        logits = self.base_pair_score(pair).squeeze(-1)
-        return logits.masked_fill(~option_mask.bool(), -1e4)
+            return self._joint_decision_logits(pair, option_mask, query_hidden, query_attention_mask, context_hidden, attention_mask)
+        return self.base_pair_score(pair).squeeze(-1).masked_fill(~option_mask.bool(), -1e4)
 
-    def _apply_base_compatibility(self, out, base_logits: torch.Tensor, option_mask: torch.Tensor):
+    def _apply_base_compatibility(self, out, base_logits, option_mask):
         scale = float(self.config.recurrent_logit_scale)
         per_step_logits = base_logits[:, None, :] + scale * out.per_step_logits
         step_mask = option_mask[:, None, :].bool().expand_as(per_step_logits)
         per_step_probs = masked_softmax(per_step_logits, step_mask)
         selected = out.selected_step.long().clamp_min(1) - 1
         batch = torch.arange(base_logits.size(0), device=base_logits.device)
-        logits = per_step_logits[batch, selected]
-        probs = per_step_probs[batch, selected]
-        energy = -torch.logsumexp(logits.float().masked_fill(~option_mask.bool(), -1e4), dim=-1)
         out.per_step_logits = per_step_logits
         out.per_step_probs = per_step_probs
-        out.logits = logits
-        out.probs = probs
-        out.energy = energy
+        out.logits = per_step_logits[batch, selected]
+        out.probs = per_step_probs[batch, selected]
+        out.energy = -torch.logsumexp(out.logits.float().masked_fill(~option_mask.bool(), -1e4), dim=-1)
         return out
 
     def forward(
@@ -301,6 +223,9 @@ class DazoForDecision(PreTrainedModel):
         joint_input_ids: Optional[torch.Tensor] = None,
         joint_attention_mask: Optional[torch.Tensor] = None,
         marker_positions: Optional[torch.Tensor] = None,
+        shared_input_ids: Optional[torch.Tensor] = None,
+        shared_attention_mask: Optional[torch.Tensor] = None,
+        shared_marker_positions: Optional[torch.Tensor] = None,
         task_type: Optional[torch.Tensor] = None,
         rank_ids: Optional[torch.Tensor] = None,
         max_steps: Optional[int] = None,
@@ -311,36 +236,36 @@ class DazoForDecision(PreTrainedModel):
         correctness_threshold: Optional[float] = None,
         **unused,
     ):
-        context = self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         marker_logits = None
-        if self.config.joint_candidate_encoding:
-            if joint_input_ids is None or joint_attention_mask is None or marker_positions is None:
-                raise ValueError(
-                    "joint_candidate_encoding=True requires joint_input_ids, joint_attention_mask, and marker_positions"
-                )
-            options = self._encode_joint_candidates(
-                joint_input_ids, joint_attention_mask, marker_positions
-            )
-            marker_logits = self.marker_scorer(options).squeeze(-1)
-            marker_logits = marker_logits.masked_fill(~option_mask.bool(), -1e4)
-        else:
-            options = self._encode_options(option_input_ids, option_attention_mask)
-
-        reasoning_context = context
-        reasoning_mask = attention_mask.bool()
         query_hidden = None
-        if self.config.query_conditioning:
-            if query_input_ids is None or query_attention_mask is None:
-                raise ValueError("query_conditioning=True requires query_input_ids and query_attention_mask")
-            query_hidden = self.backbone(
-                input_ids=query_input_ids, attention_mask=query_attention_mask
-            ).last_hidden_state
-            # Joint candidate markers already saw the full query inside mmBERT;
-            # applying the post-encoder query fusion again would confound this A/B.
-            if not self.config.joint_candidate_encoding:
-                options = self._condition_options_on_query(options, query_hidden, query_attention_mask)
-            reasoning_context = torch.cat([query_hidden, context], dim=1)
-            reasoning_mask = torch.cat([query_attention_mask.bool(), attention_mask.bool()], dim=1)
+
+        if getattr(self.config, "shared_joint_encoding", False):
+            if shared_input_ids is None or shared_attention_mask is None or shared_marker_positions is None:
+                raise ValueError("shared_joint_encoding=True requires shared_input_ids/shared_attention_mask/shared_marker_positions")
+            context, options = self._encode_shared(shared_input_ids, shared_attention_mask, shared_marker_positions)
+            attention_mask = shared_attention_mask
+            marker_logits = self.marker_scorer(options).squeeze(-1).masked_fill(~option_mask.bool(), -1e4)
+            reasoning_context = context
+            reasoning_mask = shared_attention_mask.bool()
+        else:
+            context = self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            if self.config.joint_candidate_encoding:
+                if joint_input_ids is None or joint_attention_mask is None or marker_positions is None:
+                    raise ValueError("joint_candidate_encoding=True requires joint_input_ids/joint_attention_mask/marker_positions")
+                options = self._encode_joint_candidates(joint_input_ids, joint_attention_mask, marker_positions)
+                marker_logits = self.marker_scorer(options).squeeze(-1).masked_fill(~option_mask.bool(), -1e4)
+            else:
+                options = self._encode_options(option_input_ids, option_attention_mask)
+            reasoning_context = context
+            reasoning_mask = attention_mask.bool()
+            if self.config.query_conditioning:
+                if query_input_ids is None or query_attention_mask is None:
+                    raise ValueError("query_conditioning=True requires query_input_ids and query_attention_mask")
+                query_hidden = self.backbone(input_ids=query_input_ids, attention_mask=query_attention_mask).last_hidden_state
+                if not self.config.joint_candidate_encoding:
+                    options = self._condition_options_on_query(options, query_hidden, query_attention_mask)
+                reasoning_context = torch.cat([query_hidden, context], dim=1)
+                reasoning_mask = torch.cat([query_attention_mask.bool(), attention_mask.bool()], dim=1)
 
         out = self.core(
             context_hidden=reasoning_context,
@@ -353,20 +278,13 @@ class DazoForDecision(PreTrainedModel):
             min_steps=min_steps or self.config.min_steps,
             adaptive=adaptive,
             halt_threshold=halt_threshold if halt_threshold is not None else self.config.halt_threshold,
-            convergence_threshold=(convergence_threshold if convergence_threshold is not None else self.config.convergence_threshold),
-            correctness_threshold=(correctness_threshold if correctness_threshold is not None else self.config.correctness_threshold),
+            convergence_threshold=convergence_threshold if convergence_threshold is not None else self.config.convergence_threshold,
+            correctness_threshold=correctness_threshold if correctness_threshold is not None else self.config.correctness_threshold,
         )
 
         if marker_logits is not None:
             out = self._apply_base_compatibility(out, marker_logits, option_mask)
         elif self.config.base_compatibility:
-            base_logits = self._base_compatibility_logits(
-                context,
-                attention_mask,
-                options,
-                option_mask,
-                query_hidden=query_hidden,
-                query_attention_mask=query_attention_mask,
-            )
+            base_logits = self._base_compatibility_logits(context, attention_mask, options, option_mask, query_hidden, query_attention_mask)
             out = self._apply_base_compatibility(out, base_logits, option_mask)
         return out.to_dict()
