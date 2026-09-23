@@ -1,8 +1,10 @@
 """Dazo Hugging Face wrapper.
 
 Dazo keeps evidence, query, and candidate options as distinct streams. Newer checkpoints can
-query-condition every candidate before evidence matching, while the recurrent latent core acts
-as a residual refinement. The design remains permutation-equivariant over options.
+query-condition every candidate before evidence matching. A lightweight joint decision-token
+head, inspired by Laya's contextual marker scoring, lets candidates interact before scoring while
+remaining permutation-equivariant over the option set. The recurrent latent core acts as a
+residual refinement.
 """
 from __future__ import annotations
 
@@ -65,12 +67,43 @@ class DazoForDecision(PreTrainedModel):
             self.base_cross_attn = nn.MultiheadAttention(
                 hidden, heads, dropout=config.dropout, batch_first=True
             )
-            self.base_pair_score = nn.Sequential(
-                nn.LayerNorm(hidden * 4),
-                nn.Linear(hidden * 4, hidden),
-                nn.GELU(),
-                nn.Linear(hidden, 1),
-            )
+            if config.joint_decision_head:
+                decision_dim = int(config.decision_dim)
+                decision_heads = self._valid_heads(decision_dim, config.num_attention_heads)
+                self.decision_pair_proj = nn.Sequential(
+                    nn.LayerNorm(hidden * 4),
+                    nn.Linear(hidden * 4, decision_dim),
+                    nn.GELU(),
+                )
+                self.decision_global_proj = nn.Sequential(
+                    nn.LayerNorm(hidden),
+                    nn.Linear(hidden, decision_dim),
+                )
+                layer = nn.TransformerEncoderLayer(
+                    d_model=decision_dim,
+                    nhead=decision_heads,
+                    dim_feedforward=decision_dim * 4,
+                    dropout=config.dropout,
+                    activation="gelu",
+                    batch_first=True,
+                    norm_first=True,
+                )
+                self.decision_head = nn.TransformerEncoder(
+                    layer,
+                    num_layers=max(1, int(config.decision_head_layers)),
+                    enable_nested_tensor=False,
+                )
+                self.decision_score = nn.Sequential(
+                    nn.LayerNorm(decision_dim),
+                    nn.Linear(decision_dim, 1),
+                )
+            else:
+                self.base_pair_score = nn.Sequential(
+                    nn.LayerNorm(hidden * 4),
+                    nn.Linear(hidden * 4, hidden),
+                    nn.GELU(),
+                    nn.Linear(hidden, 1),
+                )
 
         if config.freeze_backbone:
             self.freeze_backbone()
@@ -168,12 +201,36 @@ class DazoForDecision(PreTrainedModel):
         update = self.query_fuse(pair)
         return self.query_fuse_norm(option_hidden + update)
 
+    def _joint_decision_logits(
+        self,
+        pair: torch.Tensor,
+        option_mask: torch.Tensor,
+        query_hidden: Optional[torch.Tensor],
+        query_attention_mask: Optional[torch.Tensor],
+        context_hidden: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        option_tokens = self.decision_pair_proj(pair)
+        if query_hidden is not None and query_attention_mask is not None:
+            global_hidden = self._mean_pool(query_hidden, query_attention_mask)
+        else:
+            global_hidden = self._mean_pool(context_hidden, attention_mask)
+        global_token = self.decision_global_proj(global_hidden).unsqueeze(1)
+        tokens = torch.cat([global_token, option_tokens], dim=1)
+        global_valid = torch.ones(option_mask.size(0), 1, dtype=torch.bool, device=option_mask.device)
+        valid = torch.cat([global_valid, option_mask.bool()], dim=1)
+        contextualized = self.decision_head(tokens, src_key_padding_mask=~valid)
+        logits = self.decision_score(contextualized[:, 1:]).squeeze(-1)
+        return logits.masked_fill(~option_mask.bool(), -1e4)
+
     def _base_compatibility_logits(
         self,
         context_hidden: torch.Tensor,
         attention_mask: torch.Tensor,
         option_hidden: torch.Tensor,
         option_mask: torch.Tensor,
+        query_hidden: Optional[torch.Tensor] = None,
+        query_attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         options = self.base_option_norm(option_hidden)
         context = self.base_context_norm(context_hidden)
@@ -185,6 +242,15 @@ class DazoForDecision(PreTrainedModel):
             need_weights=False,
         )
         pair = torch.cat([options, attended, options * attended, (options - attended).abs()], dim=-1)
+        if self.config.joint_decision_head:
+            return self._joint_decision_logits(
+                pair,
+                option_mask,
+                query_hidden,
+                query_attention_mask,
+                context_hidden,
+                attention_mask,
+            )
         logits = self.base_pair_score(pair).squeeze(-1)
         return logits.masked_fill(~option_mask.bool(), -1e4)
 
@@ -228,6 +294,7 @@ class DazoForDecision(PreTrainedModel):
         options = self._encode_options(option_input_ids, option_attention_mask)
         reasoning_context = context
         reasoning_mask = attention_mask.bool()
+        query_hidden = None
 
         if self.config.query_conditioning:
             if query_input_ids is None or query_attention_mask is None:
@@ -255,6 +322,13 @@ class DazoForDecision(PreTrainedModel):
         )
 
         if self.config.base_compatibility:
-            base_logits = self._base_compatibility_logits(context, attention_mask, options, option_mask)
+            base_logits = self._base_compatibility_logits(
+                context,
+                attention_mask,
+                options,
+                option_mask,
+                query_hidden=query_hidden,
+                query_attention_mask=query_attention_mask,
+            )
             out = self._apply_base_compatibility(out, base_logits, option_mask)
         return out.to_dict()
