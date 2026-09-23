@@ -23,9 +23,17 @@ def move(batch, device):
 def parse_budgets(spec: str, max_steps: int) -> list[int]:
     vals = sorted({int(x.strip()) for x in spec.split(",") if x.strip()})
     vals = [x for x in vals if 1 <= x <= max_steps]
-    if not vals:
-        vals = [max_steps]
-    return sorted(set(vals))
+    return vals or [max_steps]
+
+
+def model_forward(model, batch, max_steps):
+    return model(
+        input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
+        query_input_ids=batch.get("query_input_ids"), query_attention_mask=batch.get("query_attention_mask"),
+        option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
+        option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
+        max_steps=max_steps,
+    )
 
 
 @torch.no_grad()
@@ -33,16 +41,10 @@ def evaluate(model, loader, device, max_steps):
     model.eval()
     total = correct = 0
     loss_sum = 0.0
-    pred_counts = None
-    label_counts = None
+    pred_counts = label_counts = None
     for batch in loader:
         batch = move(batch, device)
-        outputs = model(
-            input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
-            option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
-            option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
-            max_steps=max_steps,
-        )
+        outputs = model_forward(model, batch, max_steps)
         loss, _ = compute_dazo_loss(outputs, batch["labels"], batch["option_mask"], batch["is_ood"])
         pred = outputs["logits"].argmax(-1)
         total += batch["labels"].numel()
@@ -103,13 +105,16 @@ def main():
     print(f"training recurrent budgets: {depth_budgets}; max_steps={cfg.max_steps}")
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.backbone_name)
-    collator = DazoCollator(tokenizer, cfg.context_max_length, cfg.option_max_length)
+    collator = DazoCollator(
+        tokenizer,
+        context_max_length=cfg.context_max_length,
+        option_max_length=cfg.option_max_length,
+        query_max_length=cfg.query_max_length,
+    )
     train_ds = JsonlDecisionDataset(args.train)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, collate_fn=collator)
     train_eval_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=False, collate_fn=collator) if args.eval_train else None
-    eval_loader = None
-    if args.eval:
-        eval_loader = DataLoader(JsonlDecisionDataset(args.eval), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
+    eval_loader = DataLoader(JsonlDecisionDataset(args.eval), batch_size=args.batch_size, shuffle=False, collate_fn=collator) if args.eval else None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     amp_enabled, amp_dtype, scaler_enabled = choose_amp(device)
@@ -139,8 +144,6 @@ def main():
     Path(args.output).mkdir(parents=True, exist_ok=True)
     for epoch in range(1, args.epochs + 1):
         model.train()
-        # If the backbone is entirely frozen, keep it in eval mode. Partially
-        # trainable top layers remain in train mode so task adaptation is real.
         if not backbone_params:
             model.backbone.eval()
         optimizer.zero_grad(set_to_none=True)
@@ -150,12 +153,7 @@ def main():
             batch = move(batch, device)
             train_budget = rng.choice(depth_budgets)
             with torch.amp.autocast("cuda", enabled=amp_enabled, dtype=amp_dtype):
-                outputs = model(
-                    input_ids=batch["input_ids"], attention_mask=batch["attention_mask"],
-                    option_input_ids=batch["option_input_ids"], option_attention_mask=batch["option_attention_mask"],
-                    option_mask=batch["option_mask"], task_type=batch["task_type"], rank_ids=batch["rank_ids"],
-                    max_steps=train_budget,
-                )
+                outputs = model_forward(model, batch, train_budget)
                 loss, parts = compute_dazo_loss(outputs, batch["labels"], batch["option_mask"], batch["is_ood"])
                 loss = loss / args.grad_accum
             scaler.scale(loss).backward()
@@ -165,7 +163,6 @@ def main():
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-
             for k, v in parts.items():
                 rolling[k] = rolling.get(k, 0.0) + float(v)
             rolling["budget"] = rolling.get("budget", 0.0) + float(train_budget)
@@ -180,7 +177,6 @@ def main():
             print(f"train_eval epoch={epoch} max_budget={cfg.max_steps}: {evaluate(model, train_eval_loader, device, cfg.max_steps)}")
         if eval_loader is not None:
             print(f"eval epoch={epoch} max_budget={cfg.max_steps}: {evaluate(model, eval_loader, device, cfg.max_steps)}")
-
         if args.save_every > 0 and epoch % args.save_every == 0:
             ckpt = Path(args.output) / f"epoch-{epoch}"
             ckpt.mkdir(parents=True, exist_ok=True)
