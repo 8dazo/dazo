@@ -18,6 +18,8 @@
   "convergence_threshold": 0.02,
   "correctness_threshold": 0.70,
   "freeze_backbone": true,
+  "unfreeze_last_n_layers": 2,
+  "backbone_lr": 0.00002,
   "base_compatibility": true,
   "recurrent_logit_scale": 0.1
 }
