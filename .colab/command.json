@@ -1,11 +1,13 @@
 {
-  "id": 39,
-  "task": "gate1_eval",
+  "id": 40,
+  "task": "train_pilot",
   "args": {
-    "checkpoint": "/content/dazo/outputs/dazo-micro-markers/final",
-    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
-    "loops": "1,8",
-    "batch_size": 1
+    "output": "/content/dazo/outputs/dazo-15m-micro",
+    "epochs": 10,
+    "batch_size": 8,
+    "grad_accum": 1,
+    "lr": 0.001,
+    "depth_budgets": "1"
   },
-  "note": "Measure exact 64-example train memorization for per-candidate joint marker encoding before next architecture change."
+  "note": "Dazo-15M A/B: 13M XtremeDistil backbone, single packed marker pass, fully fine-tuned, tiny 128d recurrent head."
 }
