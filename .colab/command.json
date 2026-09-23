@@ -1,13 +1,10 @@
 {
-  "id": 16,
-  "task": "train_pilot",
+  "id": 17,
+  "task": "prepare_pilot",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-fixed1",
-    "epochs": 20,
-    "batch_size": 8,
-    "grad_accum": 1,
-    "lr": 0.001,
-    "depth_budgets": "1"
+    "train_max_depth": 3,
+    "limit_train": 64,
+    "limit_eval": 64
   },
-  "note": "Fixed-one-loop 64-example memorization test. Evaluate on train immediately after completion."
+  "note": "Rebuild the tiny balanced ProofWriter dataset after the Colab runtime was reclaimed."
 }
