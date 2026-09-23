@@ -1,6 +1,13 @@
 {
-  "id": 34,
-  "task": "tests",
-  "args": {},
-  "note": "Validate Laya-inspired joint decision-token head before micro training."
+  "id": 35,
+  "task": "train_pilot",
+  "args": {
+    "output": "/content/dazo/outputs/dazo-micro-jointhead",
+    "epochs": 10,
+    "batch_size": 2,
+    "grad_accum": 4,
+    "lr": 0.001,
+    "depth_budgets": "1"
+  },
+  "note": "A/B micro test: protected query + joint option decision tokens + 2048 evidence, frozen mmBERT, one loop."
 }
