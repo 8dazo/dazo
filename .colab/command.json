@@ -1,13 +1,11 @@
 {
-  "id": 14,
-  "task": "train_pilot",
+  "id": 15,
+  "task": "gate1_eval",
   "args": {
-    "output": "/content/dazo/outputs/dazo-micro-overfit",
-    "epochs": 20,
-    "batch_size": 8,
-    "grad_accum": 1,
-    "lr": 0.001,
-    "depth_budgets": "1,2,3,4,6,8"
+    "checkpoint": "/content/dazo/outputs/dazo-micro-overfit/final",
+    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
+    "loops": "1,2,4,6,8",
+    "batch_size": 8
   },
-  "note": "Overfit sanity check: train current Dazo architecture aggressively on only 64 balanced examples. Store repeated epoch checkpoints on ephemeral Colab disk, not Drive."
+  "note": "Evaluate the 20-epoch micro-overfit checkpoint on the same 64 examples it trained on. This distinguishes a structural learning failure from generalization failure."
 }
