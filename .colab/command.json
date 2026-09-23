@@ -1,6 +1,13 @@
 {
-  "id": 37,
-  "task": "tests",
-  "args": {},
-  "note": "Validate per-candidate joint marker encoding before micro training."
+  "id": 38,
+  "task": "train_pilot",
+  "args": {
+    "output": "/content/dazo/outputs/dazo-micro-markers",
+    "epochs": 10,
+    "batch_size": 1,
+    "grad_accum": 8,
+    "lr": 0.001,
+    "depth_budgets": "1"
+  },
+  "note": "A/B micro test: per-candidate joint [MASK] marker encoding with full query/evidence context, frozen mmBERT, one loop."
 }
