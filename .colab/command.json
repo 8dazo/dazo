@@ -1,11 +1,6 @@
 {
-  "id": 22,
-  "task": "gate1_eval",
-  "args": {
-    "checkpoint": "/content/dazo/outputs/dazo-micro-basecompat/final",
-    "data": "/content/dazo/data/proofwriter-pilot/train.jsonl",
-    "loops": "1,8",
-    "batch_size": 8
-  },
-  "note": "Evaluate the base-compatibility micro checkpoint on the same 64 training examples."
+  "id": 23,
+  "task": "tests",
+  "args": {},
+  "note": "Run invariants after replacing mean-pooled base compatibility with option-conditioned token cross-attention."
 }
