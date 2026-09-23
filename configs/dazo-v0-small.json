@@ -3,6 +3,7 @@
   "context_max_length": 2048,
   "query_max_length": 128,
   "option_max_length": 32,
+  "joint_max_length": 2048,
   "latent_dim": 384,
   "n_evidence_slots": 16,
   "n_hypothesis_slots": 8,
@@ -23,8 +24,9 @@
   "backbone_lr": 0.00002,
   "base_compatibility": true,
   "query_conditioning": true,
-  "joint_decision_head": true,
+  "joint_decision_head": false,
   "decision_head_layers": 2,
   "decision_dim": 384,
+  "joint_candidate_encoding": true,
   "recurrent_logit_scale": 0.1
 }
