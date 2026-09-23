@@ -26,18 +26,9 @@ def resolve_model_reference(spec: str) -> str:
     path = Path(spec).expanduser()
     if path.exists():
         return str(path.resolve())
-
-    looks_local = (
-        path.is_absolute()
-        or spec.startswith(".")
-        or spec.startswith("outputs/")
-        or len(path.parts) > 2
-    )
+    looks_local = path.is_absolute() or spec.startswith(".") or spec.startswith("outputs/") or len(path.parts) > 2
     if looks_local:
-        raise SystemExit(
-            f"Local checkpoint not found: {path}. Training must complete successfully before "
-            "evaluation; rerun train.py and confirm it prints 'saved .../final'."
-        )
+        raise SystemExit(f"Local checkpoint not found: {path}. Training must complete successfully before evaluation.")
     return spec
 
 
@@ -54,29 +45,20 @@ def _load_safetensor_state(path: Path) -> dict[str, torch.Tensor]:
     single = path / "model.safetensors"
     if single.exists():
         return load_file(str(single), device="cpu")
-
     index_path = path / "model.safetensors.index.json"
     if index_path.exists():
         index = json.loads(index_path.read_text())
-        state: dict[str, torch.Tensor] = {}
+        state = {}
         for filename in sorted(set(index["weight_map"].values())):
             state.update(load_file(str(path / filename), device="cpu"))
         return state
-
     raise FileNotFoundError(f"No safetensors checkpoint found in {path}")
 
 
 def load_dazo_checkpoint(model_ref: str) -> DazoForDecision:
-    """Reload a local Dazo checkpoint without Transformers' meta-device restore path.
-
-    Training builds mmBERT through the normal pretrained path. Rebuilding that exact
-    backbone and then applying Dazo's saved state dict keeps ModernBERT's runtime
-    buffers/derived state consistent while restoring all trained Dazo weights.
-    """
     path = Path(model_ref)
     if not path.is_dir():
         return DazoForDecision.from_pretrained(model_ref).eval()
-
     cfg = DazoConfig.from_pretrained(path)
     model = DazoForDecision.from_backbone_pretrained(cfg)
     state = _load_safetensor_state(path)
@@ -84,10 +66,7 @@ def load_dazo_checkpoint(model_ref: str) -> DazoForDecision:
     missing = [k for k in incompatible.missing_keys if not k.endswith("role_ids")]
     unexpected = list(incompatible.unexpected_keys)
     if missing or unexpected:
-        raise RuntimeError(
-            "Dazo checkpoint state mismatch: "
-            f"missing={missing[:20]} unexpected={unexpected[:20]}"
-        )
+        raise RuntimeError(f"Dazo checkpoint state mismatch: missing={missing[:20]} unexpected={unexpected[:20]}")
     print(f"checkpoint_restore=direct_safetensors tensors={len(state)}")
     return model.eval()
 
@@ -98,9 +77,7 @@ def _assert_index_range(name: str, tensor: torch.Tensor, size: int) -> None:
     lo = int(tensor.min().item())
     hi = int(tensor.max().item())
     if lo < 0 or hi >= size:
-        raise RuntimeError(
-            f"{name} index out of range before CUDA: min={lo} max={hi} valid=[0,{size - 1}]"
-        )
+        raise RuntimeError(f"{name} index out of range before CUDA: min={lo} max={hi} valid=[0,{size - 1}]")
 
 
 def _preflight_batch(model: DazoForDecision, batch: dict, batch_index: int) -> None:
@@ -108,14 +85,17 @@ def _preflight_batch(model: DazoForDecision, batch: dict, batch_index: int) -> N
     task_size = int(model.core.compressor.task_emb.num_embeddings)
     rank_size = int(model.core.decoder.rank_emb.num_embeddings)
     _assert_index_range("input_ids", batch["input_ids"], vocab_size)
+    if "query_input_ids" in batch:
+        _assert_index_range("query_input_ids", batch["query_input_ids"], vocab_size)
     _assert_index_range("option_input_ids", batch["option_input_ids"], vocab_size)
     _assert_index_range("task_type", batch["task_type"], task_size)
     _assert_index_range("rank_ids", batch["rank_ids"], rank_size)
     if batch_index == 0:
+        qmax = int(batch["query_input_ids"].max()) if "query_input_ids" in batch else -1
         print(
             "preflight "
-            f"vocab_size={vocab_size} tokenizer_input_max={int(batch['input_ids'].max())} "
-            f"option_input_max={int(batch['option_input_ids'].max())} "
+            f"vocab_size={vocab_size} evidence_input_max={int(batch['input_ids'].max())} "
+            f"query_input_max={qmax} option_input_max={int(batch['option_input_ids'].max())} "
             f"task_range=({int(batch['task_type'].min())},{int(batch['task_type'].max())}) "
             f"rank_range=({int(batch['rank_ids'].min())},{int(batch['rank_ids'].max())})"
         )
@@ -127,7 +107,7 @@ def main():
     p.add_argument("--data", required=True)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--loops", default="1,2,4,6,8")
-    p.add_argument("--output", help="Optional JSON report path.")
+    p.add_argument("--output")
     args = p.parse_args()
 
     model_ref = resolve_model_reference(args.model)
@@ -138,28 +118,22 @@ def main():
     model = load_dazo_checkpoint(model_ref)
     tokenizer_ref = model.config.backbone_name
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_ref)
-    print(
-        f"tokenizer={tokenizer_ref} class={tokenizer.__class__.__name__} "
-        f"len={len(tokenizer)} model_vocab={model.backbone.get_input_embeddings().num_embeddings}"
-    )
+    print(f"tokenizer={tokenizer_ref} class={tokenizer.__class__.__name__} len={len(tokenizer)} model_vocab={model.backbone.get_input_embeddings().num_embeddings}")
 
-    collator = DazoCollator(tokenizer, model.config.context_max_length, model.config.option_max_length)
-    loader = DataLoader(
-        JsonlDecisionDataset(data_ref),
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collator,
+    collator = DazoCollator(
+        tokenizer,
+        context_max_length=model.config.context_max_length,
+        option_max_length=model.config.option_max_length,
+        query_max_length=getattr(model.config, "query_max_length", 128),
     )
+    loader = DataLoader(JsonlDecisionDataset(data_ref), batch_size=args.batch_size, shuffle=False, collate_fn=collator)
     loops = sorted(set(int(x) for x in args.loops.split(",") if x.strip()))
     max_loop = max(loops)
     if min(loops) < 1 or max_loop > model.core.reasoner.max_loop_embeddings:
-        raise SystemExit(
-            f"loop budgets {loops} exceed valid range 1..{model.core.reasoner.max_loop_embeddings}"
-        )
+        raise SystemExit(f"loop budgets {loops} exceed valid range 1..{model.core.reasoner.max_loop_embeddings}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)
-
     stats = {l: {"correct": 0, "total": 0, "probs": [], "labels": []} for l in loops}
     by_depth = {l: {} for l in loops}
     correctness_rows = []
@@ -214,16 +188,11 @@ def main():
 
     correctness = torch.cat(correctness_rows, dim=0).bool()
     if correctness.numel():
-        ever_correct_before_final = (
-            correctness[:, :-1].any(dim=1)
-            if correctness.size(1) > 1
-            else torch.zeros(correctness.size(0), dtype=torch.bool)
-        )
+        ever_correct_before_final = correctness[:, :-1].any(dim=1) if correctness.size(1) > 1 else torch.zeros(correctness.size(0), dtype=torch.bool)
         final_wrong = ~correctness[:, -1]
         overthought = ever_correct_before_final & final_wrong
         report["overthinking_rate"] = float(overthought.float().mean())
         report["ever_correct_then_final_wrong"] = int(overthought.sum())
-
         transitions = {}
         for i in range(len(loops) - 1):
             a, b = loops[i], loops[i + 1]
